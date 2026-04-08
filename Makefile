@@ -1,24 +1,29 @@
 # Master Makefile for Greenhouse Project
 
-.PHONY: all install setup build run clean help test mosquitto-start mosquitto-stop sensor-start controller-start dashboard
+.PHONY: all install setup build run clean help test lint \
+        mosquitto-start mosquitto-stop sensor-start controller-start \
+        firebase-sync dashboard
 
 help:
-	@echo "🌱 Greenhouse Automation System - Build & Run Commands"
+	@echo "Greenhouse Automation System - Build and Run Commands"
 	@echo ""
-	@echo "Setup & Installation:"
-	@echo "  make install              Install system dependencies"
+	@echo "Setup and Installation:"
+	@echo "  make install              Install system dependencies (requires sudo)"
 	@echo "  make setup                Setup Python virtual environment"
 	@echo ""
 	@echo "Building:"
-	@echo "  make build                Compile all components"
-	@echo "  make clean                Clean build artifacts"
+	@echo "  make build                Compile the RT controller"
+	@echo "  make clean                Remove build artifacts"
 	@echo ""
-	@echo "Running:"
-	@echo "  make run                  Start all services (requires WSL/Linux)"
-	@echo "  make mosquitto-start      Start MQTT broker only"
-	@echo "  make sensor-start         Start sensor simulator only"
-	@echo "  make controller-start     Start RT controller only (requires sudo)"
-	@echo "  make dashboard            Start web dashboard server"
+	@echo "Running individual components:"
+	@echo "  make mosquitto-start      Start MQTT broker"
+	@echo "  make sensor-start         Start sensor simulator"
+	@echo "  make controller-start     Start RT controller (requires sudo)"
+	@echo "  make firebase-sync        Start Firebase sync (requires credentials file)"
+	@echo "  make dashboard            Start web dashboard HTTP server"
+	@echo ""
+	@echo "Running everything:"
+	@echo "  make run                  Start all components via quickstart.sh"
 	@echo ""
 	@echo "Development:"
 	@echo "  make test                 Run tests"
@@ -27,33 +32,39 @@ help:
 
 all: build run
 
+# ------------------------------------------------------------------
+
 install:
 	@echo "Installing system dependencies..."
 	sudo apt update
 	sudo apt install -y mosquitto mosquitto-clients
-	sudo apt install -y build-essential gcc make cmake
-	sudo apt install -y libmosquitto-dev libmosquitto0
+	sudo apt install -y build-essential gcc make
+	sudo apt install -y libmosquitto-dev
 	sudo apt install -y python3 python3-pip python3-venv
-	@echo "✓ Dependencies installed"
+	@echo "Done."
 
 setup: install
 	@echo "Setting up Python virtual environment..."
 	python3 -m venv venv
 	. venv/bin/activate && pip install --upgrade pip
 	. venv/bin/activate && pip install -r requirements.txt
-	@echo "✓ Virtual environment ready"
-	@echo "  Activate with: source venv/bin/activate"
+	@echo "Virtual environment ready."
+	@echo "Activate with: source venv/bin/activate"
 
-build: 
+# ------------------------------------------------------------------
+
+build:
 	@echo "Building RT Controller..."
 	$(MAKE) -C rt_controller clean
 	$(MAKE) -C rt_controller
-	@echo "✓ RT Controller built"
+	@echo "Build complete."
 
 clean:
 	@echo "Cleaning build artifacts..."
 	$(MAKE) -C rt_controller clean
-	@echo "✓ Clean complete"
+	@echo "Done."
+
+# ------------------------------------------------------------------
 
 mosquitto-start:
 	@echo "Starting MQTT Broker..."
@@ -72,6 +83,13 @@ controller-start:
 	@echo "Starting RT Controller (requires sudo for real-time scheduling)..."
 	cd rt_controller && sudo ./greenhouse_controller
 
+firebase-sync:
+	@echo "Starting Firebase Sync Service..."
+	. venv/bin/activate && python3 firebase_sync/firebase_sync.py \
+		--credentials green-house-d7b7f-firebase-adminsdk-fbsvc-bf0cb07c7c.json \
+		--firebase-url https://green-house-d7b7f-default-rtdb.europe-west1.firebasedatabase.app \
+		--greenhouse-id 1
+
 dashboard:
 	@echo "Starting web dashboard server..."
 	@echo "Dashboard URL: http://localhost:8000/dashboard/index.html"
@@ -79,19 +97,22 @@ dashboard:
 
 run:
 	@echo "Starting all components..."
-	@echo "This will run in foreground. Use Ctrl+C to stop all."
-	@echo ""
 	@./quickstart.sh
+
+# ------------------------------------------------------------------
 
 test:
 	@echo "Running tests..."
 	@echo "TODO: Add test suite"
 
 lint:
-	@echo "Running code linters..."
-	@echo "  Python:"
-	python3 -m pylint sensors/sensor_simulator.py firebase_sync/firebase_sync.py || true
-	@echo "  C:"
-	clang --analyze rt_controller/greenhouse_controller.c || true
-
-.PHONY: help install setup build run clean mosquitto-start mosquitto-stop sensor-start controller-start dashboard test lint
+	@echo "Linting Python..."
+	python3 -m pylint sensors/sensor_simulator.py \
+	                  firebase_sync/firebase_sync.py \
+	                  firebase_sync/firebase_client.py \
+	                  firebase_sync/topic_parser.py || true
+	@echo "Linting C..."
+	clang --analyze rt_controller/greenhouse_controller.c \
+	                rt_controller/mqtt_handler.c \
+	                rt_controller/rules.c \
+	                rt_controller/rt_scheduler.c || true

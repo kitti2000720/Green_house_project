@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Greenhouse Control Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/mqttws31.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -61,6 +62,11 @@
         .status-dot.connected {
             background: #51cf66;
             animation: pulse-green 2s infinite;
+        }
+
+        .status-dot.simulating {
+            background: #ffa94d;
+            animation: pulse 2s infinite;
         }
 
         @keyframes pulse {
@@ -246,14 +252,6 @@
             color: #999;
         }
 
-        .chart-container {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            margin-top: 20px;
-        }
-
         .last-update {
             font-size: 12px;
             color: #999;
@@ -283,7 +281,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>🌱 Greenhouse Control Dashboard</h1>
+            <h1>Greenhouse Control Dashboard</h1>
             <div class="status-bar">
                 <div class="connection-status">
                     <span class="status-dot" id="statusDot"></span>
@@ -306,7 +304,7 @@
                     <span class="metric-value">-- <span class="metric-unit">%</span></span>
                 </div>
                 <div class="metric" id="co2Metric">
-                    <span class="metric-name">CO₂ Level</span>
+                    <span class="metric-name">CO2 Level</span>
                     <span class="metric-value">-- <span class="metric-unit">ppm</span></span>
                 </div>
 
@@ -326,152 +324,220 @@
 
             <!-- Alerts Card -->
             <div class="card grid-full" id="alertsCard" style="display: none;">
-                <h2>🚨 Active Alerts</h2>
+                <h2>Active Alerts</h2>
                 <div id="alertsList"></div>
             </div>
         </div>
     </div>
 
     <script>
-        // Configuration
         const CONFIG = {
-            mqttBroker: 'ws://localhost:9001', // WebSocket endpoint
-            pollInterval: 5000, // ms
-            greenhouseId: 1
+            mqttHost: 'localhost',
+            mqttPort: 9001,
+            mqttPath: '/mqtt',
+            pollInterval: 5000,
+            greenhouseId: 1,
+            numPlants: 3
         };
 
-        // Data storage
         let systemState = {
             connected: false,
+            simulating: false,
             env: {},
             plants: {},
             alerts: []
         };
 
-        // Mock MQTT client (since WebSocket MQTT might not be available)
-        // In production, use: https://github.com/emqx/MQTT-Client-Examples
-        class MockMQTTClient {
-            constructor() {
-                this.connected = false;
-                this.subscriptions = {};
-                this.simulateConnection();
+        let mqttClient = null;
+        let simulationTimer = null;
+
+        // Initialize plant state
+        for (let i = 1; i <= CONFIG.numPlants; i++) {
+            systemState.plants[i] = { moisture: null, pump: 'OFF' };
+        }
+
+        // --- Real MQTT via Paho WebSocket ---
+
+        function connectMQTT() {
+            const clientId = 'dashboard-' + Math.random().toString(16).substr(2, 8);
+            try {
+                mqttClient = new Paho.MQTT.Client(CONFIG.mqttHost, CONFIG.mqttPort, CONFIG.mqttPath, clientId);
+            } catch (e) {
+                console.warn('Paho MQTT not available, falling back to simulation.');
+                startSimulation();
+                return;
             }
 
-            connect() {
-                setTimeout(() => {
-                    this.connected = true;
-                    this.updateUI();
-                }, 1000);
+            mqttClient.onConnectionLost = (resp) => {
+                console.warn('MQTT connection lost:', resp.errorMessage);
+                systemState.connected = false;
+                systemState.simulating = false;
+                updateConnectionStatus();
+                setTimeout(connectMQTT, 5000);
+            };
+
+            mqttClient.onMessageArrived = (message) => {
+                handleMQTTMessage(message.destinationName, message.payloadString);
+            };
+
+            mqttClient.connect({
+                timeout: 4,
+                onSuccess: () => {
+                    systemState.connected = true;
+                    systemState.simulating = false;
+                    updateConnectionStatus();
+                    stopSimulation();
+
+                    const gh = CONFIG.greenhouseId;
+                    mqttClient.subscribe(`greenhouse/${gh}/env/+`);
+                    mqttClient.subscribe(`greenhouse/${gh}/plant/+/soil`);
+                    mqttClient.subscribe(`greenhouse/${gh}/plant/+/pump`);
+                    mqttClient.subscribe(`greenhouse/${gh}/actuators/+`);
+                    mqttClient.subscribe(`greenhouse/${gh}/status/+`);
+                },
+                onFailure: () => {
+                    console.info('MQTT broker not reachable, using simulation mode.');
+                    systemState.connected = false;
+                    updateConnectionStatus();
+                    startSimulation();
+                }
+            });
+        }
+
+        function publishMQTT(topic, payload) {
+            if (!mqttClient || !systemState.connected) return;
+            const msg = new Paho.MQTT.Message(payload);
+            msg.destinationName = topic;
+            msg.qos = 1;
+            mqttClient.send(msg);
+        }
+
+        function handleMQTTMessage(topic, payload) {
+            const gh = CONFIG.greenhouseId;
+            const now = new Date();
+
+            if (topic === `greenhouse/${gh}/env/temp`) {
+                systemState.env.temp = parseFloat(payload);
+            } else if (topic === `greenhouse/${gh}/env/humidity`) {
+                systemState.env.humidity = parseFloat(payload);
+            } else if (topic === `greenhouse/${gh}/env/co2`) {
+                systemState.env.co2 = parseFloat(payload);
+            } else {
+                // Plant topics: greenhouse/1/plant/2/soil
+                const soilMatch = topic.match(/plant\/(\d+)\/soil$/);
+                const pumpMatch = topic.match(/plant\/(\d+)\/pump$/);
+                if (soilMatch) {
+                    const id = parseInt(soilMatch[1]);
+                    if (!systemState.plants[id]) systemState.plants[id] = {};
+                    systemState.plants[id].moisture = parseFloat(payload);
+                } else if (pumpMatch) {
+                    const id = parseInt(pumpMatch[1]);
+                    if (!systemState.plants[id]) systemState.plants[id] = {};
+                    systemState.plants[id].pump = payload;
+                }
             }
 
-            publish(topic, message) {
-                console.log(`Published to ${topic}:`, message);
-                // In real implementation, publish via WebSocket
+            updateDashboard();
+        }
+
+        // --- Simulation fallback ---
+
+        function startSimulation() {
+            if (simulationTimer) return;
+            systemState.simulating = true;
+            updateConnectionStatus();
+
+            // Seed initial values
+            systemState.env = { temp: 22, humidity: 65, co2: 800 };
+            for (let i = 1; i <= CONFIG.numPlants; i++) {
+                systemState.plants[i] = { moisture: 40 + Math.random() * 30, pump: 'OFF' };
             }
 
-            subscribe(topic) {
-                this.subscriptions[topic] = true;
-                console.log(`Subscribed to ${topic}`);
-            }
+            simulationTimer = setInterval(() => {
+                // Simulate environment drift
+                systemState.env.temp = Math.max(15, Math.min(40,
+                    systemState.env.temp + (Math.random() - 0.4) * 0.3));
+                systemState.env.humidity = Math.max(30, Math.min(95,
+                    systemState.env.humidity + (Math.random() - 0.5) * 0.8));
+                systemState.env.co2 = Math.max(400, Math.min(2000,
+                    systemState.env.co2 + (Math.random() - 0.3) * 15));
 
-            simulateConnection() {
-                this.connect();
-                // Simulate sensor updates
-                this.startSimulation();
-            }
+                for (let i = 1; i <= CONFIG.numPlants; i++) {
+                    const delta = systemState.plants[i].pump === 'ON'
+                        ? Math.random() * 2
+                        : -(Math.random() * 0.8);
+                    systemState.plants[i].moisture = Math.max(0, Math.min(100,
+                        systemState.plants[i].moisture + delta));
+                }
 
-            startSimulation() {
-                setInterval(() => {
-                    // Simulate environment data
-                    systemState.env = {
-                        temp: 22 + Math.random() * 5,
-                        humidity: 60 + Math.random() * 15,
-                        co2: 800 + Math.random() * 400
-                    };
-
-                    // Simulate plant data
-                    systemState.plants = {};
-                    for (let i = 1; i <= 3; i++) {
-                        systemState.plants[i] = {
-                            moisture: 40 + Math.random() * 40,
-                            pump: Math.random() > 0.8 ? 'ON' : 'OFF'
-                        };
-                    }
-
-                    this.updateUI();
-                }, CONFIG.pollInterval);
-            }
-
-            updateUI() {
                 updateDashboard();
+            }, CONFIG.pollInterval);
+        }
+
+        function stopSimulation() {
+            if (simulationTimer) {
+                clearInterval(simulationTimer);
+                simulationTimer = null;
+            }
+            systemState.simulating = false;
+        }
+
+        // --- UI update ---
+
+        function updateConnectionStatus() {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('connectionText');
+            dot.className = 'status-dot';
+            if (systemState.connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected to MQTT Broker (live data)';
+            } else if (systemState.simulating) {
+                dot.classList.add('simulating');
+                text.textContent = 'Simulation mode (broker not available)';
+            } else {
+                text.textContent = 'Connecting...';
             }
         }
 
-        const mqtt = new MockMQTTClient();
-
-        // Update dashboard with current state
         function updateDashboard() {
-            // Update connection status
-            const statusDot = document.getElementById('statusDot');
-            const connectionText = document.getElementById('connectionText');
-            
-            if (mqtt.connected) {
-                statusDot.classList.add('connected');
-                connectionText.textContent = 'Connected to MQTT Broker';
-            } else {
-                statusDot.classList.remove('connected');
-                connectionText.textContent = 'Disconnected from MQTT Broker';
-            }
-
-            // Update timestamp
             const now = new Date();
-            document.getElementById('lastUpdate').textContent = 
+            document.getElementById('lastUpdate').textContent =
                 `Last update: ${now.toLocaleTimeString()}`;
 
-            // Update environment metrics
-            if (systemState.env.temp !== undefined) {
+            // Temperature
+            if (systemState.env.temp !== undefined && systemState.env.temp !== null) {
                 const tempMetric = document.getElementById('tempMetric');
-                const temp = systemState.env.temp.toFixed(1);
-                tempMetric.querySelector('.metric-value').innerHTML = 
+                const temp = parseFloat(systemState.env.temp).toFixed(1);
+                tempMetric.querySelector('.metric-value').innerHTML =
                     `${temp} <span class="metric-unit">°C</span>`;
-                
-                // Warn if too hot
-                if (temp > 30) {
-                    tempMetric.classList.add('critical');
-                } else {
-                    tempMetric.classList.remove('critical');
-                }
-
-                document.getElementById('envUpdate').textContent = 
+                tempMetric.classList.toggle('critical', temp > 30);
+                document.getElementById('envUpdate').textContent =
                     `Updated: ${now.toLocaleTimeString()}`;
             }
 
-            if (systemState.env.humidity !== undefined) {
+            // Humidity
+            if (systemState.env.humidity !== undefined && systemState.env.humidity !== null) {
                 const humidityMetric = document.getElementById('humidityMetric');
-                const humidity = systemState.env.humidity.toFixed(1);
-                humidityMetric.querySelector('.metric-value').innerHTML = 
+                const humidity = parseFloat(systemState.env.humidity).toFixed(1);
+                humidityMetric.querySelector('.metric-value').innerHTML =
                     `${humidity} <span class="metric-unit">%</span>`;
             }
 
-            if (systemState.env.co2 !== undefined) {
+            // CO2
+            if (systemState.env.co2 !== undefined && systemState.env.co2 !== null) {
                 const co2Metric = document.getElementById('co2Metric');
-                const co2 = systemState.env.co2.toFixed(0);
-                co2Metric.querySelector('.metric-value').innerHTML = 
+                const co2 = parseFloat(systemState.env.co2).toFixed(0);
+                co2Metric.querySelector('.metric-value').innerHTML =
                     `${co2} <span class="metric-unit">ppm</span>`;
-                
-                // Alert if CO2 too high
                 if (co2 > 1500) {
                     co2Metric.classList.add('critical');
-                    addAlert('CO₂ Level Critical', `CO₂ level is ${co2} ppm`, 'critical');
+                    addAlert('CO2 Level Critical', `CO2 level is ${co2} ppm`, 'critical');
                 } else {
                     co2Metric.classList.remove('critical');
                 }
             }
 
-            // Update plants
             updatePlantsDisplay();
-
-            // Update alerts
             updateAlertsDisplay();
         }
 
@@ -479,16 +545,14 @@
             const container = document.getElementById('plantsContainer');
             container.innerHTML = '';
 
-            for (let i = 1; i <= 3; i++) {
+            for (let i = 1; i <= CONFIG.numPlants; i++) {
                 const plant = systemState.plants[i] || {};
-                const moisture = (plant.moisture || 0).toFixed(1);
-                
-                const card = document.createElement('div');
-                card.className = 'plant-card';
-                if (moisture < 30) {
-                    card.classList.add('warning');
-                }
+                const moisture = plant.moisture != null ? parseFloat(plant.moisture).toFixed(1) : '--';
+                const pump = plant.pump || 'OFF';
+                const isLow = plant.moisture != null && parseFloat(plant.moisture) < 30;
 
+                const card = document.createElement('div');
+                card.className = 'plant-card' + (isLow ? ' warning' : '');
                 card.innerHTML = `
                     <div class="plant-title">Plant ${i}</div>
                     <div class="metric" style="background: white; margin-bottom: 10px;">
@@ -497,14 +561,13 @@
                     </div>
                     <div class="metric" style="background: white;">
                         <span class="metric-name">Pump</span>
-                        <span class="metric-value" style="color: ${plant.pump === 'ON' ? '#51cf66' : '#999'}">${plant.pump || 'OFF'}</span>
+                        <span class="metric-value" style="color: ${pump === 'ON' ? '#51cf66' : '#999'}">${pump}</span>
                     </div>
                     <div class="controls">
-                        <button class="btn btn-on" onclick="togglePump(${i}, 'on')">Turn ON</button>
-                        <button class="btn btn-off" onclick="togglePump(${i}, 'off')">Turn OFF</button>
+                        <button class="btn btn-on" onclick="togglePump(${i}, 'ON')">Turn ON</button>
+                        <button class="btn btn-off" onclick="togglePump(${i}, 'OFF')">Turn OFF</button>
                     </div>
                 `;
-
                 container.appendChild(card);
             }
         }
@@ -536,36 +599,38 @@
 
         function addAlert(title, message, type = 'info') {
             const now = new Date().toLocaleTimeString();
-            systemState.alerts.push({
-                title,
-                message,
-                type,
-                time: now
-            });
-            // Keep only last 10 alerts
-            if (systemState.alerts.length > 10) {
-                systemState.alerts.shift();
-            }
+            // Avoid duplicate alerts
+            const last = systemState.alerts[systemState.alerts.length - 1];
+            if (last && last.message === message) return;
+            systemState.alerts.push({ title, message, type, time: now });
+            if (systemState.alerts.length > 10) systemState.alerts.shift();
         }
 
         function togglePump(plantId, state) {
             const topic = `greenhouse/${CONFIG.greenhouseId}/plant/${plantId}/pump`;
-            const message = state.toUpperCase();
-            mqtt.publish(topic, message);
-            addAlert(`Plant ${plantId} Pump`, `Pump turned ${message}`, 'info');
+            if (systemState.connected) {
+                publishMQTT(topic, state);
+            } else {
+                // Update simulation state directly
+                if (!systemState.plants[plantId]) systemState.plants[plantId] = {};
+                systemState.plants[plantId].pump = state;
+                updateDashboard();
+            }
+            addAlert(`Plant ${plantId} Pump`, `Pump turned ${state}`, 'info');
         }
 
         function toggleWindow() {
             const topic = `greenhouse/${CONFIG.greenhouseId}/actuators/window`;
-            const message = 'OPEN'; // Toggle logic would be more complex
-            mqtt.publish(topic, message);
+            if (systemState.connected) {
+                publishMQTT(topic, 'OPEN');
+            }
             addAlert('Ventilation', 'Opening ventilation window', 'info');
         }
 
-        // Initialize on load
+        // --- Boot ---
         window.addEventListener('load', () => {
-            console.log('Dashboard initialized');
-            updateDashboard();
+            updatePlantsDisplay();
+            connectMQTT();
         });
     </script>
 </body>

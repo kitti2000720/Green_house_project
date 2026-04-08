@@ -1,10 +1,16 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c99
+CC      = gcc
+CFLAGS  = -Wall -Wextra -O2 -std=c99
 LDFLAGS = -lmosquitto -lpthread -lrt
-TARGET = greenhouse_controller
+TARGET  = greenhouse_controller
 
-SOURCES = greenhouse_controller.c
+SOURCES = greenhouse_controller.c \
+          mqtt_handler.c          \
+          rules.c                 \
+          rt_scheduler.c
+
 OBJECTS = $(SOURCES:.c=.o)
+
+# ------------------------------------------------------------------ #
 
 all: $(TARGET)
 

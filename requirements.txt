@@ -7,6 +7,11 @@ paho-mqtt==1.6.1          # MQTT client library
 # Optional - Firebase Cloud Sync
 firebase-admin==6.0.0     # Firebase Realtime Database
 
+# Optional - Raspberry Pi hardware sensors (install only on RPi)
+# Adafruit-DHT==1.4.0                   # DHT22 temperature/humidity sensor
+# adafruit-circuitpython-ads1x15==2.2.23 # ADS1115 ADC for soil moisture
+# RPi.GPIO==0.7.1                        # Raspberry Pi GPIO
+
 # Optional - Development tools
 # pylint==2.17.0
 # pytest==7.2.0

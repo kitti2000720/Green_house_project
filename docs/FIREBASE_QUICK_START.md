@@ -1,6 +1,3 @@
-# 🔥 Firebase Quick Start (5 percben)
-
-## 🌱 Projekt Adatbázis
 
 **Database URL:**
 ```
@@ -34,7 +31,7 @@ https://green-house-d7b7f-default-rtdb.europe-west1.firebasedatabase.app/
 
 ```bash
 # 1. Másolj a letöltött fájlt
-cp ~/Downloads/greenhouse-*-key.json ~/Beadando/config/firebase-credentials.json
+cp C:\Users\molar\Green_house_project\green-house-d7b7f-firebase-adminsdk-fbsvc-bf0cb07c7c.json
 
 # 2. Firebase SDK telepítése
 pip install firebase-admin
