@@ -1,0 +1,12 @@
+# Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Required
+paho-mqtt==1.6.1          # MQTT client library
+
+# Optional - Firebase Cloud Sync
+firebase-admin==6.0.0     # Firebase Realtime Database
+
+# Optional - Development tools
+# pylint==2.17.0
+# pytest==7.2.0
