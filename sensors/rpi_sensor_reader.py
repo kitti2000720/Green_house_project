@@ -1,15 +1,26 @@
 """
-Raspberry Pi Sensor Reader
+Raspberry Pi Plant Node - Sensor Reader
 
-Reads real sensors and publishes to MQTT.
+One instance of this script runs on each Raspberry Pi.
+Each RPi belongs to exactly one greenhouse and one plant:
 
-Supported hardware
-------------------
-- DHT22  : temperature + humidity via GPIO
-- ADS1115: 4-channel ADC over I2C for capacitive soil moisture sensors
+    --greenhouse-id <id>   --plant-id <id>
+
+Sensors read
+------------
+- DHT22    : temperature + humidity  (GPIO)
+- ADS1115  : soil moisture           (I2C ADC, channel 0)
+- MH-Z19B  : CO2 concentration       (UART)
+
+Error handling
+--------------
+Every sensor read is validated against physical bounds defined in config.py.
+A reading that falls outside the valid range is discarded and logged.
+If a sensor fails MAX_CONSECUTIVE_ERRORS times in a row, a warning is
+emitted to alert the operator.
 
 Install hardware libraries on the Raspberry Pi:
-    pip install Adafruit-DHT adafruit-circuitpython-ads1x15 RPi.GPIO
+    pip install Adafruit-DHT adafruit-circuitpython-ads1x15 RPi.GPIO mh-z19
 """
 
 import os
@@ -26,7 +37,6 @@ except ImportError:
     print("ERROR: paho-mqtt not installed. Run: pip install paho-mqtt")
     sys.exit(1)
 
-# Optional hardware libraries - warn but do not abort if missing
 try:
     import Adafruit_DHT
     _DHT_AVAILABLE = True
@@ -42,7 +52,14 @@ try:
     _ADS_AVAILABLE = True
 except ImportError:
     _ADS_AVAILABLE = False
-    print("[RPi] Warning: ADS1115 libraries not available. Install: pip install adafruit-circuitpython-ads1x15")
+    print("[RPi] Warning: ADS1115 libraries not available.")
+
+try:
+    import mh_z19
+    _MHZ19_AVAILABLE = True
+except ImportError:
+    _MHZ19_AVAILABLE = False
+    print("[RPi] Warning: mh_z19 not available. Install: pip install mh-z19")
 
 try:
     import RPi.GPIO as GPIO
@@ -54,104 +71,214 @@ from config import (
     DEFAULT_MQTT_HOST,
     DEFAULT_MQTT_PORT,
     DEFAULT_GREENHOUSE_ID,
+    DEFAULT_PLANT_ID,
     DEFAULT_PUBLISH_INTERVAL,
+    DHT22_GPIO_PIN,
+    ADS1115_I2C_ADDR,
+    ADS1115_CHANNEL,
+    MHZ19_SERIAL_PORT,
+    SOIL_VOLTAGE_DRY,
+    SOIL_VOLTAGE_WET,
+    VALID_TEMP_RANGE,
+    VALID_HUMIDITY_RANGE,
+    VALID_CO2_RANGE,
+    VALID_SOIL_RANGE,
 )
 
-# Soil moisture sensor voltage calibration points
-SOIL_VOLTAGE_DRY = 1.0   # volts at 0% moisture
-SOIL_VOLTAGE_WET = 2.5   # volts at 100% moisture
+# How many consecutive sensor failures trigger a warning log
+MAX_CONSECUTIVE_ERRORS = 5
 
-DHT_DEFAULT_PIN     = 17    # GPIO pin number
-ADS_DEFAULT_ADDRESS = 0x48  # I2C address
 
+# ------------------------------------------------------------------
+# Sensor validation helper
+# ------------------------------------------------------------------
+
+def _validate(value: float, valid_range: tuple, name: str) -> Optional[float]:
+    """
+    Return value if it is within valid_range, otherwise log and return None.
+    valid_range is (min, max) inclusive.
+    """
+    lo, hi = valid_range
+    if lo <= value <= hi:
+        return value
+    print(f"[Validate] {name}={value} is outside valid range [{lo}, {hi}] - discarding")
+    return None
+
+
+# ------------------------------------------------------------------
+# Sensor driver classes
+# ------------------------------------------------------------------
 
 class DHT22Reader:
-    """Reads temperature and humidity from a DHT22 sensor."""
+    """Reads temperature and humidity from a DHT22 sensor via GPIO."""
 
     def __init__(self, gpio_pin: int):
-        self._pin       = gpio_pin
-        self._available = _DHT_AVAILABLE
+        self._pin          = gpio_pin
+        self._available    = _DHT_AVAILABLE
+        self._error_count  = 0
+        if self._available:
+            print(f"[DHT22] Configured on GPIO {gpio_pin}")
 
     def read(self) -> dict:
-        """Return {"temp": float, "humidity": float} or {} on failure."""
+        """
+        Return validated {temp, humidity} or {} on failure.
+        Logs a warning after MAX_CONSECUTIVE_ERRORS consecutive failures.
+        """
         if not self._available:
             return {}
         try:
             humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT22, self._pin)
-            if humidity is not None and temperature is not None:
-                return {"temp": temperature, "humidity": humidity}
+            if humidity is None or temperature is None:
+                raise ValueError("DHT22 returned None")
+
+            temp = _validate(temperature, VALID_TEMP_RANGE,     "temp")
+            hum  = _validate(humidity,    VALID_HUMIDITY_RANGE, "humidity")
+
+            if temp is None or hum is None:
+                raise ValueError("Validation failed")
+
+            self._error_count = 0
+            return {"temp": temp, "humidity": hum}
+
         except Exception as exc:
-            print(f"[DHT22] Read error: {exc}")
+            self._error_count += 1
+            print(f"[DHT22] Read error (attempt {self._error_count}): {exc}")
+            if self._error_count >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[DHT22] WARNING: {self._error_count} consecutive failures. "
+                      f"Check sensor wiring on GPIO {self._pin}.")
         return {}
 
 
 class SoilMoistureReader:
-    """Reads soil moisture percentage from capacitive sensors via ADS1115 ADC."""
+    """Reads soil moisture from a capacitive sensor via ADS1115 ADC."""
 
     _CHANNEL_PINS = [ADS1115.P0, ADS1115.P1, ADS1115.P2, ADS1115.P3] if _ADS_AVAILABLE else []
 
-    def __init__(self, i2c_address: int = ADS_DEFAULT_ADDRESS):
-        self._ads = None
+    def __init__(self, i2c_address: int, channel: int):
+        self._channel     = channel
+        self._ads         = None
+        self._error_count = 0
         if not _ADS_AVAILABLE:
             return
         try:
-            i2c      = busio.I2C(board.SCL, board.SDA)
+            i2c       = busio.I2C(board.SCL, board.SDA)
             self._ads = ADS1115(i2c, address=i2c_address)
-            print(f"[ADS1115] Configured at I2C address 0x{i2c_address:02x}")
+            print(f"[ADS1115] Configured at I2C 0x{i2c_address:02x}, channel {channel}")
         except Exception as exc:
             print(f"[ADS1115] Init error: {exc}")
 
-    def read_channel(self, channel: int) -> Optional[float]:
-        """
-        Read moisture as a percentage (0-100) from ADC channel 0-3.
-        Returns None when the ADC is unavailable or an error occurs.
-        """
-        if self._ads is None or channel not in range(4):
+    def read(self) -> Optional[float]:
+        """Return moisture percentage (0-100) or None on failure."""
+        if self._ads is None or self._channel not in range(4):
             return None
         try:
-            voltage = AnalogIn(self._ads, self._CHANNEL_PINS[channel]).voltage
+            voltage = AnalogIn(self._ads, self._CHANNEL_PINS[self._channel]).voltage
             pct     = (voltage - SOIL_VOLTAGE_DRY) / (SOIL_VOLTAGE_WET - SOIL_VOLTAGE_DRY) * 100.0
-            return max(0.0, min(100.0, pct))
+            result  = _validate(pct, VALID_SOIL_RANGE, "soil")
+            if result is None:
+                raise ValueError("Out of range")
+            self._error_count = 0
+            return result
         except Exception as exc:
-            print(f"[ADS1115] Read error (ch{channel}): {exc}")
+            self._error_count += 1
+            print(f"[ADS1115] Read error (attempt {self._error_count}): {exc}")
+            if self._error_count >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[ADS1115] WARNING: {self._error_count} consecutive failures.")
+        return None
+
+
+class CO2SensorReader:
+    """Reads CO2 concentration from an MH-Z19B sensor via UART."""
+
+    def __init__(self, serial_port: str):
+        self._port        = serial_port
+        self._available   = _MHZ19_AVAILABLE
+        self._error_count = 0
+        if self._available:
+            print(f"[MH-Z19] Configured on {serial_port}")
+
+    def read(self) -> Optional[int]:
+        """Return CO2 in ppm, or None on failure."""
+        if not self._available:
             return None
+        try:
+            result = mh_z19.read(serial_console_untouched=True)
+            if not result or "co2" not in result:
+                raise ValueError("Empty response from MH-Z19")
+            co2 = int(result["co2"])
+            validated = _validate(co2, VALID_CO2_RANGE, "co2")
+            if validated is None:
+                raise ValueError("Validation failed")
+            self._error_count = 0
+            return int(validated)
+        except Exception as exc:
+            self._error_count += 1
+            print(f"[MH-Z19] Read error (attempt {self._error_count}): {exc}")
+            if self._error_count >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[MH-Z19] WARNING: {self._error_count} consecutive failures. "
+                      f"Check serial port {self._port}.")
+        return None
 
 
-class RaspberryPiSensorReader:
+# ------------------------------------------------------------------
+# Main node class
+# ------------------------------------------------------------------
+
+class RaspberryPiPlantNode:
     """
-    Reads real RPi sensors and publishes readings to MQTT.
+    Reads all sensors on a single Raspberry Pi and publishes to MQTT.
 
-    Sensors are mapped as:
-      - Plant N -> ADS1115 channel N-1  (plant 1 = ch 0, plant 2 = ch 1, ...)
-      - Env     -> DHT22 on gpio_pin
+    Each instance represents one plant in one greenhouse.
+
+    Topic structure
+    ---------------
+    Published:
+        greenhouse/{greenhouse_id}/plant/{plant_id}/temp
+        greenhouse/{greenhouse_id}/plant/{plant_id}/humidity
+        greenhouse/{greenhouse_id}/plant/{plant_id}/co2
+        greenhouse/{greenhouse_id}/plant/{plant_id}/soil
+
+    Subscribed (actuator commands):
+        greenhouse/{greenhouse_id}/plant/{plant_id}/pump    -> ON / OFF
+        greenhouse/{greenhouse_id}/plant/{plant_id}/window  -> OPEN / CLOSED
     """
 
     def __init__(
         self,
-        broker_host: str  = DEFAULT_MQTT_HOST,
-        broker_port: int  = DEFAULT_MQTT_PORT,
+        broker_host: str   = DEFAULT_MQTT_HOST,
+        broker_port: int   = DEFAULT_MQTT_PORT,
         greenhouse_id: int = DEFAULT_GREENHOUSE_ID,
-        dht_pin: int       = DHT_DEFAULT_PIN,
-        ads_address: int   = ADS_DEFAULT_ADDRESS,
-        num_plants: int    = 3,
+        plant_id: int      = DEFAULT_PLANT_ID,
+        dht_pin: int       = DHT22_GPIO_PIN,
+        ads_address: int   = ADS1115_I2C_ADDR,
+        ads_channel: int   = ADS1115_CHANNEL,
+        co2_port: str      = MHZ19_SERIAL_PORT,
     ):
         self.broker_host   = broker_host
         self.broker_port   = broker_port
         self.greenhouse_id = greenhouse_id
-        self.num_plants    = num_plants
+        self.plant_id      = plant_id
+
+        self._topic_base = f"greenhouse/{greenhouse_id}/plant/{plant_id}"
 
         self._dht  = DHT22Reader(dht_pin)
-        self._soil = SoilMoistureReader(ads_address)
+        self._soil = SoilMoistureReader(ads_address, ads_channel)
+        self._co2  = CO2SensorReader(co2_port)
 
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
+        self._client.on_message    = self._on_message
         self._connected = False
+
+    # ------------------------------------------------------------------
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self._connected = True
             print(f"[RPi] Connected to {self.broker_host}:{self.broker_port}")
+            client.subscribe(f"{self._topic_base}/pump")
+            client.subscribe(f"{self._topic_base}/window")
         else:
             print(f"[RPi] Connection failed: rc={rc}")
 
@@ -160,7 +287,15 @@ class RaspberryPiSensorReader:
         if rc != 0:
             print(f"[RPi] Unexpected disconnect: rc={rc}")
 
-    def _publish(self, topic: str, value: float) -> None:
+    def _on_message(self, client, userdata, msg):
+        actuator = msg.topic.split("/")[-1]
+        payload  = msg.payload.decode()
+        print(f"[RPi] Command: {actuator} = {payload}")
+
+    # ------------------------------------------------------------------
+
+    def _publish(self, metric: str, value: float) -> None:
+        topic = f"{self._topic_base}/{metric}"
         self._client.publish(topic, int(value), qos=1)
         print(f"[RPi] {topic} = {value:.1f}")
 
@@ -168,18 +303,21 @@ class RaspberryPiSensorReader:
         if not self._connected:
             return
 
-        gh = self.greenhouse_id
-
         dht = self._dht.read()
         if "temp" in dht:
-            self._publish(f"greenhouse/{gh}/env/temp",     dht["temp"])
+            self._publish("temp",     dht["temp"])
         if "humidity" in dht:
-            self._publish(f"greenhouse/{gh}/env/humidity", dht["humidity"])
+            self._publish("humidity", dht["humidity"])
 
-        for plant_id in range(1, self.num_plants + 1):
-            moisture = self._soil.read_channel(plant_id - 1)
-            if moisture is not None:
-                self._publish(f"greenhouse/{gh}/plant/{plant_id}/soil", moisture)
+        soil = self._soil.read()
+        if soil is not None:
+            self._publish("soil", soil)
+
+        co2 = self._co2.read()
+        if co2 is not None:
+            self._publish("co2", co2)
+
+    # ------------------------------------------------------------------
 
     def run(self, interval: int = DEFAULT_PUBLISH_INTERVAL) -> None:
         try:
@@ -197,7 +335,7 @@ class RaspberryPiSensorReader:
             print(
                 f"[RPi] Running  "
                 f"greenhouse={self.greenhouse_id}  "
-                f"plants={self.num_plants}  "
+                f"plant={self.plant_id}  "
                 f"interval={interval}s"
             )
             print("Press Ctrl+C to stop.\n")
@@ -224,31 +362,38 @@ class RaspberryPiSensorReader:
 # ------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Raspberry Pi Greenhouse Sensor Reader")
-    parser.add_argument("--host",          default=DEFAULT_MQTT_HOST,
-                        help="MQTT broker host (default: %(default)s)")
-    parser.add_argument("--port",          type=int, default=DEFAULT_MQTT_PORT,
-                        help="MQTT broker port (default: %(default)s)")
-    parser.add_argument("--greenhouse-id", type=int, default=DEFAULT_GREENHOUSE_ID)
-    parser.add_argument("--dht-pin",       type=int, default=DHT_DEFAULT_PIN,
-                        help="GPIO pin for DHT22 (default: %(default)s)")
-    parser.add_argument("--ads-address",   type=lambda x: int(x, 0), default=ADS_DEFAULT_ADDRESS,
-                        help="I2C address for ADS1115, e.g. 0x48 (default: 0x%(default)02x)")
-    parser.add_argument("--plants",        type=int, default=3,
-                        help="Number of plants (default: %(default)s)")
-    parser.add_argument("--interval",      type=int, default=DEFAULT_PUBLISH_INTERVAL,
-                        help="Publish interval in seconds (default: %(default)s)")
+    parser = argparse.ArgumentParser(
+        description="Raspberry Pi Plant Node - reads sensors for one plant and publishes to MQTT",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--host",          default=DEFAULT_MQTT_HOST)
+    parser.add_argument("--port",          type=int, default=DEFAULT_MQTT_PORT)
+    parser.add_argument("--greenhouse-id", type=int, default=DEFAULT_GREENHOUSE_ID,
+                        help="Greenhouse this RPi belongs to")
+    parser.add_argument("--plant-id",      type=int, default=DEFAULT_PLANT_ID,
+                        help="Plant ID for this RPi node")
+    parser.add_argument("--dht-pin",       type=int, default=DHT22_GPIO_PIN,
+                        help="GPIO pin for DHT22")
+    parser.add_argument("--ads-address",   type=lambda x: int(x, 0), default=ADS1115_I2C_ADDR,
+                        help="I2C address for ADS1115 (e.g. 0x48)")
+    parser.add_argument("--ads-channel",   type=int, default=ADS1115_CHANNEL,
+                        help="ADS1115 channel for soil moisture")
+    parser.add_argument("--co2-port",      default=MHZ19_SERIAL_PORT,
+                        help="Serial port for MH-Z19 CO2 sensor")
+    parser.add_argument("--interval",      type=int, default=DEFAULT_PUBLISH_INTERVAL)
     args = parser.parse_args()
 
-    reader = RaspberryPiSensorReader(
+    node = RaspberryPiPlantNode(
         broker_host=args.host,
         broker_port=args.port,
         greenhouse_id=args.greenhouse_id,
+        plant_id=args.plant_id,
         dht_pin=args.dht_pin,
         ads_address=args.ads_address,
-        num_plants=args.plants,
+        ads_channel=args.ads_channel,
+        co2_port=args.co2_port,
     )
-    reader.run(interval=args.interval)
+    node.run(interval=args.interval)
 
 
 if __name__ == "__main__":

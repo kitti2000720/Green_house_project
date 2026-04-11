@@ -11,7 +11,7 @@
 
 #define MQTT_BROKER_HOST    "localhost"
 #define MQTT_BROKER_PORT    1883
-#define GREENHOUSE_ID       1
+#define GREENHOUSE_ID       1           /* default; override with --greenhouse-id */
 #define LOOP_INTERVAL_NS    100000000   /* 100 ms */
 
 /* ------------------------------------------------------------------ */
@@ -50,9 +50,18 @@ static void *rt_control_loop(void *arg)
 
 /* ------------------------------------------------------------------ */
 
-int main(void)
+int main(int argc, char *argv[])
 {
-    printf("=== Greenhouse RT-Controller ===\n\n");
+    /* Parse optional --greenhouse-id <N> argument */
+    int greenhouse_id = GREENHOUSE_ID;
+    for (int i = 1; i < argc - 1; i++) {
+        if (strcmp(argv[i], "--greenhouse-id") == 0) {
+            greenhouse_id = atoi(argv[i + 1]);
+            i++;
+        }
+    }
+
+    printf("=== Greenhouse RT-Controller (greenhouse_id=%d) ===\n\n", greenhouse_id);
 
     signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
@@ -66,7 +75,7 @@ int main(void)
     if (mqtt_handler_init(&g_mqtt,
                           MQTT_BROKER_HOST,
                           MQTT_BROKER_PORT,
-                          GREENHOUSE_ID) != 0) {
+                          greenhouse_id) != 0) {
         return EXIT_FAILURE;
     }
 

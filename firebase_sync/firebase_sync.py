@@ -42,27 +42,31 @@ class FirebaseSyncService:
     - Log alerts when thresholds are breached.
     """
 
-    # Topic patterns to subscribe to.
+    # Topic patterns to subscribe to per greenhouse.
     # Use {id} as a placeholder for the greenhouse ID.
+    # Add new patterns here to capture additional topics without changing
+    # any other part of the code.
     SUBSCRIPTIONS = [
         "greenhouse/{id}/plant/+/soil",
+        "greenhouse/{id}/plant/+/temp",
+        "greenhouse/{id}/plant/+/humidity",
+        "greenhouse/{id}/plant/+/co2",
         "greenhouse/{id}/plant/+/pump",
-        "greenhouse/{id}/env/+",
         "greenhouse/{id}/actuators/+",
         "greenhouse/{id}/status/+",
     ]
 
     def __init__(
         self,
-        mqtt_host: str       = MQTT_HOST,
-        mqtt_port: int       = MQTT_PORT,
-        greenhouse_id: int   = GREENHOUSE_ID,
+        mqtt_host: str        = MQTT_HOST,
+        mqtt_port: int        = MQTT_PORT,
+        greenhouse_ids: list  = None,
         credentials_path: str = None,
-        firebase_url: str    = FIREBASE_URL,
+        firebase_url: str     = FIREBASE_URL,
     ):
-        self.mqtt_host     = mqtt_host
-        self.mqtt_port     = mqtt_port
-        self.greenhouse_id = greenhouse_id
+        self.mqtt_host      = mqtt_host
+        self.mqtt_port      = mqtt_port
+        self.greenhouse_ids = greenhouse_ids or [GREENHOUSE_ID]
 
         self._firebase      = FirebaseClient(credentials_path, firebase_url)
         self._event_buffer  = []
@@ -85,10 +89,11 @@ class FirebaseSyncService:
         self._connected = True
         print(f"[Sync] MQTT connected to {self.mqtt_host}:{self.mqtt_port}")
 
-        for pattern in self.SUBSCRIPTIONS:
-            topic = pattern.format(id=self.greenhouse_id)
-            client.subscribe(topic)
-            print(f"[Sync] Subscribed: {topic}")
+        for gh_id in self.greenhouse_ids:
+            for pattern in self.SUBSCRIPTIONS:
+                topic = pattern.format(id=gh_id)
+                client.subscribe(topic)
+                print(f"[Sync] Subscribed: {topic}")
 
     def _on_disconnect(self, client, userdata, rc):
         self._connected = False
@@ -105,14 +110,18 @@ class FirebaseSyncService:
 
         record = {"timestamp": timestamp, "topic": topic, "value": payload}
 
-        self._firebase.write_latest(self.greenhouse_id, topic, payload, timestamp)
-        self._firebase.write_event(self.greenhouse_id, record)
+        # Extract greenhouse_id from topic: greenhouse/{id}/...
+        parts = topic.split("/")
+        gh_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else self.greenhouse_ids[0]
+
+        self._firebase.write_latest(gh_id, topic, payload, timestamp)
+        self._firebase.write_event(gh_id, record)
 
         self._event_buffer.append(record)
         if len(self._event_buffer) >= EVENT_BUFFER_SIZE:
             self._flush_buffer()
 
-        parsed = parse_topic(topic, payload, self.greenhouse_id)
+        parsed = parse_topic(topic, payload, gh_id)
         for alert in check_alerts(parsed):
             print(f"[Sync] ALERT [{alert['severity'].upper()}]: {alert['message']}")
 
@@ -168,18 +177,26 @@ def main():
                         help="MQTT broker host (default: %(default)s)")
     parser.add_argument("--mqtt-port",      type=int, default=MQTT_PORT,
                         help="MQTT broker port (default: %(default)s)")
-    parser.add_argument("--greenhouse-id",  type=int, default=GREENHOUSE_ID,
-                        help="Greenhouse ID (default: %(default)s)")
+    parser.add_argument("--greenhouse-ids",
+                        default=str(GREENHOUSE_ID),
+                        metavar="1,2,3",
+                        help="Comma-separated list of greenhouse IDs to monitor (default: %(default)s)")
     parser.add_argument("--credentials",
                         help="Path to Firebase service-account JSON file")
     parser.add_argument("--firebase-url",   default=FIREBASE_URL,
                         help="Firebase Realtime Database URL (default: %(default)s)")
     args = parser.parse_args()
 
+    try:
+        greenhouse_ids = [int(x.strip()) for x in args.greenhouse_ids.split(",") if x.strip()]
+    except ValueError:
+        print(f"ERROR: Invalid --greenhouse-ids value: '{args.greenhouse_ids}'")
+        sys.exit(1)
+
     service = FirebaseSyncService(
         mqtt_host=args.mqtt_host,
         mqtt_port=args.mqtt_port,
-        greenhouse_id=args.greenhouse_id,
+        greenhouse_ids=greenhouse_ids,
         credentials_path=args.credentials,
         firebase_url=args.firebase_url,
     )

@@ -1,12 +1,17 @@
 """
 MQTT topic parser and alert generator.
 
-Responsibilities
-----------------
-- Parse a raw MQTT topic string into a structured dict.
-- Check whether the value breaches a threshold and return alert dicts.
+Architecture note
+-----------------
+Each Raspberry Pi node publishes all its sensor readings under
+the per-plant prefix:
 
-To add a new alert rule: add an entry to ALERT_THRESHOLDS.
+    greenhouse/{id}/plant/{plant_id}/{metric}
+
+There are no shared env/ topics any more.  Every metric (temp,
+humidity, co2, soil) belongs to exactly one plant node.
+
+To add a new alert rule : add an entry to ALERT_THRESHOLDS.
 To add a new topic category: extend parse_topic().
 """
 
@@ -15,7 +20,9 @@ from typing import Any, Dict, List, Optional
 
 # ------------------------------------------------------------------
 # Alert thresholds
-# To add a rule: insert a key matching the metric name from the topic.
+#
+# Key   = metric name as it appears in the MQTT topic suffix.
+# Value = threshold dict with optional "min" and/or "max" keys.
 # ------------------------------------------------------------------
 
 ALERT_THRESHOLDS: Dict[str, Dict[str, Any]] = {
@@ -51,13 +58,24 @@ def parse_topic(topic: str, value: str, greenhouse_id: int) -> Optional[Dict[str
     Returns None when the topic does not belong to this greenhouse
     or has an unrecognised structure.
 
+    Recognised patterns
+    -------------------
+    greenhouse/{id}/plant/{plant_id}/{metric}
+        -> {"category": "plant", "plant_id": int, "metric": str, "value": str}
+
+    greenhouse/{id}/actuators/{name}
+        -> {"category": "actuator", "name": str, "value": str}
+
+    greenhouse/{id}/status/{name}
+        -> {"category": "status", "name": str, "value": str}
+
     Examples
     --------
-    parse_topic("greenhouse/1/env/temp", "27", 1)
-        -> {"category": "env", "metric": "temp", "value": "27"}
+    parse_topic("greenhouse/1/plant/2/temp", "27", 1)
+        -> {"category": "plant", "plant_id": 2, "metric": "temp", "value": "27"}
 
-    parse_topic("greenhouse/1/plant/2/soil", "45", 1)
-        -> {"category": "plant", "plant_id": 2, "metric": "soil", "value": "45"}
+    parse_topic("greenhouse/1/plant/3/soil", "22", 1)
+        -> {"category": "plant", "plant_id": 3, "metric": "soil", "value": "22"}
     """
     prefix = f"greenhouse/{greenhouse_id}/"
     if not topic.startswith(prefix):
@@ -65,15 +83,17 @@ def parse_topic(topic: str, value: str, greenhouse_id: int) -> Optional[Dict[str
 
     parts = topic[len(prefix):].split("/")
 
-    if parts[0] == "env" and len(parts) == 2:
-        return {"category": "env", "metric": parts[1], "value": value}
-
     if parts[0] == "plant" and len(parts) == 3:
         try:
             plant_id = int(parts[1])
         except ValueError:
             return None
-        return {"category": "plant", "plant_id": plant_id, "metric": parts[2], "value": value}
+        return {
+            "category": "plant",
+            "plant_id": plant_id,
+            "metric":   parts[2],
+            "value":    value,
+        }
 
     if parts[0] == "actuators" and len(parts) == 2:
         return {"category": "actuator", "name": parts[1], "value": value}
@@ -90,40 +110,41 @@ def check_alerts(parsed: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     An empty list means no thresholds were breached.
     """
-    if not parsed:
+    if not parsed or parsed["category"] != "plant":
+        return []
+
+    metric = parsed.get("metric", "")
+    if metric not in ALERT_THRESHOLDS:
         return []
 
     try:
         numeric = int(parsed["value"])
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, TypeError):
         return []
 
+    rule   = ALERT_THRESHOLDS[metric]
     alerts = []
-    metric = parsed.get("metric") or parsed.get("name", "")
-
-    if metric not in ALERT_THRESHOLDS:
-        return []
-
-    rule = ALERT_THRESHOLDS[metric]
 
     if "max" in rule and numeric > rule["max"]:
-        base = {
+        alerts.append({
             "type":     rule["alert_type"],
-            "message":  f"{metric}={numeric}{rule['unit']} exceeds limit {rule['max']}{rule['unit']}",
+            "plant_id": parsed["plant_id"],
+            "message":  (
+                f"plant[{parsed['plant_id']}] {metric}={numeric}{rule['unit']} "
+                f"exceeds limit {rule['max']}{rule['unit']}"
+            ),
             "severity": rule["severity"],
-        }
-        if parsed.get("plant_id") is not None:
-            base["plant_id"] = parsed["plant_id"]
-        alerts.append(base)
+        })
 
     if "min" in rule and numeric < rule["min"]:
-        base = {
+        alerts.append({
             "type":     rule["alert_type"],
-            "message":  f"{metric}={numeric}{rule['unit']} below minimum {rule['min']}{rule['unit']}",
+            "plant_id": parsed["plant_id"],
+            "message":  (
+                f"plant[{parsed['plant_id']}] {metric}={numeric}{rule['unit']} "
+                f"below minimum {rule['min']}{rule['unit']}"
+            ),
             "severity": rule["severity"],
-        }
-        if parsed.get("plant_id") is not None:
-            base["plant_id"] = parsed["plant_id"]
-        alerts.append(base)
+        })
 
     return alerts

@@ -9,10 +9,15 @@
 /* Add a new entry here to subscribe to an additional topic pattern.   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Each Raspberry Pi publishes under greenhouse/{id}/plant/{plant_id}/
+ * Subscribe to per-plant readings only - no shared env/ topics.
+ * Add a new entry here to subscribe to an additional metric.
+ */
 static const char *TOPIC_PATTERNS[] = {
     "greenhouse/%d/plant/+/soil",
-    "greenhouse/%d/env/temp",
-    "greenhouse/%d/env/co2",
+    "greenhouse/%d/plant/+/temp",
+    "greenhouse/%d/plant/+/co2",
 };
 
 #define TOPIC_PATTERN_COUNT \

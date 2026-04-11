@@ -1,7 +1,7 @@
 # Master Makefile for Greenhouse Project
 
 .PHONY: all install setup build run clean help test lint \
-        mosquitto-start mosquitto-stop sensor-start controller-start \
+        mosquitto-start mosquitto-stop sensor-start rpi-node controller-start \
         firebase-sync dashboard
 
 help:
@@ -17,7 +17,8 @@ help:
 	@echo ""
 	@echo "Running individual components:"
 	@echo "  make mosquitto-start      Start MQTT broker"
-	@echo "  make sensor-start         Start sensor simulator"
+	@echo "  make sensor-start         Start sensor simulator (simulates all plant nodes)"
+	@echo "  make rpi-node             Start a single real RPi plant node (run on each RPi)"
 	@echo "  make controller-start     Start RT controller (requires sudo)"
 	@echo "  make firebase-sync        Start Firebase sync (requires credentials file)"
 	@echo "  make dashboard            Start web dashboard HTTP server"
@@ -75,20 +76,26 @@ mosquitto-stop:
 	pkill mosquitto || true
 
 sensor-start:
-	@echo "Starting Sensor Simulator..."
+	@echo "Starting Sensor Simulator (2 greenhouses x 3 plants)..."
 	. venv/bin/activate && python3 sensors/sensor_simulator.py \
-		--greenhouse-id 1 --plants 3 --interval 5
+		--num-greenhouses 2 --plants 3 --interval 5
+
+# Start a single real RPi node (run this on each physical Raspberry Pi)
+rpi-node:
+	@echo "Starting RPi Plant Node..."
+	. venv/bin/activate && python3 sensors/rpi_sensor_reader.py \
+		--greenhouse-id 1 --plant-id 1 --interval 5
 
 controller-start:
 	@echo "Starting RT Controller (requires sudo for real-time scheduling)..."
 	cd rt_controller && sudo ./greenhouse_controller
 
 firebase-sync:
-	@echo "Starting Firebase Sync Service..."
+	@echo "Starting Firebase Sync Service (greenhouses 1,2)..."
 	. venv/bin/activate && python3 firebase_sync/firebase_sync.py \
 		--credentials green-house-d7b7f-firebase-adminsdk-fbsvc-bf0cb07c7c.json \
 		--firebase-url https://green-house-d7b7f-default-rtdb.europe-west1.firebasedatabase.app \
-		--greenhouse-id 1
+		--greenhouse-ids 1,2
 
 dashboard:
 	@echo "Starting web dashboard server..."
