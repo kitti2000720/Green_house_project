@@ -25,9 +25,11 @@ Install hardware libraries on the Raspberry Pi:
 
 import os
 import sys
-import time
+import signal
+import logging
 import argparse
-from typing import Optional
+import threading
+
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -42,7 +44,6 @@ try:
     _DHT_AVAILABLE = True
 except ImportError:
     _DHT_AVAILABLE = False
-    print("[RPi] Warning: Adafruit_DHT not available. Install: pip install Adafruit-DHT")
 
 try:
     import board
@@ -52,14 +53,12 @@ try:
     _ADS_AVAILABLE = True
 except ImportError:
     _ADS_AVAILABLE = False
-    print("[RPi] Warning: ADS1115 libraries not available.")
 
 try:
     import mh_z19
     _MHZ19_AVAILABLE = True
 except ImportError:
     _MHZ19_AVAILABLE = False
-    print("[RPi] Warning: mh_z19 not available. Install: pip install mh-z19")
 
 try:
     import RPi.GPIO as GPIO
@@ -67,7 +66,7 @@ try:
 except ImportError:
     _GPIO_AVAILABLE = False
 
-from config import (
+from sensors import (
     DEFAULT_MQTT_HOST,
     DEFAULT_MQTT_PORT,
     DEFAULT_GREENHOUSE_ID,
@@ -85,6 +84,8 @@ from config import (
     VALID_SOIL_RANGE,
 )
 
+logger = logging.getLogger("rpi_sensor_reader")
+
 # How many consecutive sensor failures trigger a warning log
 MAX_CONSECUTIVE_ERRORS = 5
 
@@ -93,7 +94,7 @@ MAX_CONSECUTIVE_ERRORS = 5
 # Sensor validation helper
 # ------------------------------------------------------------------
 
-def _validate(value: float, valid_range: tuple, name: str) -> Optional[float]:
+def _validate(value: float, valid_range: tuple, name: str) -> float | None:
     """
     Return value if it is within valid_range, otherwise log and return None.
     valid_range is (min, max) inclusive.
@@ -101,7 +102,7 @@ def _validate(value: float, valid_range: tuple, name: str) -> Optional[float]:
     lo, hi = valid_range
     if lo <= value <= hi:
         return value
-    print(f"[Validate] {name}={value} is outside valid range [{lo}, {hi}] - discarding")
+    logger.warning("%s=%.2f is outside valid range [%.1f, %.1f] - discarding", name, value, lo, hi)
     return None
 
 
@@ -117,7 +118,9 @@ class DHT22Reader:
         self._available    = _DHT_AVAILABLE
         self._error_count  = 0
         if self._available:
-            print(f"[DHT22] Configured on GPIO {gpio_pin}")
+            logger.info("[DHT22] Configured on GPIO %d", gpio_pin)
+        else:
+            logger.warning("[DHT22] Adafruit_DHT not available.")
 
     def read(self) -> dict:
         """
@@ -142,10 +145,12 @@ class DHT22Reader:
 
         except Exception as exc:
             self._error_count += 1
-            print(f"[DHT22] Read error (attempt {self._error_count}): {exc}")
+            logger.error("[DHT22] Read error (attempt %d): %s", self._error_count, exc)
             if self._error_count >= MAX_CONSECUTIVE_ERRORS:
-                print(f"[DHT22] WARNING: {self._error_count} consecutive failures. "
-                      f"Check sensor wiring on GPIO {self._pin}.")
+                logger.warning(
+                    "[DHT22] %d consecutive failures. Check sensor wiring on GPIO %d.",
+                    self._error_count, self._pin,
+                )
         return {}
 
 
@@ -159,15 +164,16 @@ class SoilMoistureReader:
         self._ads         = None
         self._error_count = 0
         if not _ADS_AVAILABLE:
+            logger.warning("[ADS1115] Libraries not available.")
             return
         try:
-            i2c       = busio.I2C(board.SCL, board.SDA)
+            i2c = busio.I2C(board.SCL, board.SDA)
             self._ads = ADS1115(i2c, address=i2c_address)
-            print(f"[ADS1115] Configured at I2C 0x{i2c_address:02x}, channel {channel}")
+            logger.info("[ADS1115] Configured at I2C 0x%02x, channel %d", i2c_address, channel)
         except Exception as exc:
-            print(f"[ADS1115] Init error: {exc}")
+            logger.error("[ADS1115] Init error: %s", exc)
 
-    def read(self) -> Optional[float]:
+    def read(self) -> float | None:
         """Return moisture percentage (0-100) or None on failure."""
         if self._ads is None or self._channel not in range(4):
             return None
@@ -181,9 +187,9 @@ class SoilMoistureReader:
             return result
         except Exception as exc:
             self._error_count += 1
-            print(f"[ADS1115] Read error (attempt {self._error_count}): {exc}")
+            logger.error("[ADS1115] Read error (attempt %d): %s", self._error_count, exc)
             if self._error_count >= MAX_CONSECUTIVE_ERRORS:
-                print(f"[ADS1115] WARNING: {self._error_count} consecutive failures.")
+                logger.warning("[ADS1115] %d consecutive failures.", self._error_count)
         return None
 
 
@@ -195,9 +201,11 @@ class CO2SensorReader:
         self._available   = _MHZ19_AVAILABLE
         self._error_count = 0
         if self._available:
-            print(f"[MH-Z19] Configured on {serial_port}")
+            logger.info("[MH-Z19] Configured on %s", serial_port)
+        else:
+            logger.warning("[MH-Z19] mh_z19 not available. Install: pip install mh-z19")
 
-    def read(self) -> Optional[int]:
+    def read(self) -> int | None:
         """Return CO2 in ppm, or None on failure."""
         if not self._available:
             return None
@@ -213,10 +221,12 @@ class CO2SensorReader:
             return int(validated)
         except Exception as exc:
             self._error_count += 1
-            print(f"[MH-Z19] Read error (attempt {self._error_count}): {exc}")
+            logger.error("[MH-Z19] Read error (attempt %d): %s", self._error_count, exc)
             if self._error_count >= MAX_CONSECUTIVE_ERRORS:
-                print(f"[MH-Z19] WARNING: {self._error_count} consecutive failures. "
-                      f"Check serial port {self._port}.")
+                logger.warning(
+                    "[MH-Z19] %d consecutive failures. Check serial port %s.",
+                    self._error_count, self._port,
+                )
         return None
 
 
@@ -265,42 +275,45 @@ class RaspberryPiPlantNode:
         self._soil = SoilMoistureReader(ads_address, ads_channel)
         self._co2  = CO2SensorReader(co2_port)
 
+        self._connected = threading.Event()
+        self._shutdown  = threading.Event()
+
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message    = self._on_message
-        self._connected = False
+        self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
     # ------------------------------------------------------------------
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            self._connected = True
-            print(f"[RPi] Connected to {self.broker_host}:{self.broker_port}")
+            self._connected.set()
+            logger.info("Connected to %s:%d", self.broker_host, self.broker_port)
             client.subscribe(f"{self._topic_base}/pump")
             client.subscribe(f"{self._topic_base}/window")
         else:
-            print(f"[RPi] Connection failed: rc={rc}")
+            logger.error("Connection failed: rc=%d", rc)
 
     def _on_disconnect(self, client, userdata, rc):
-        self._connected = False
+        self._connected.clear()
         if rc != 0:
-            print(f"[RPi] Unexpected disconnect: rc={rc}")
+            logger.warning("Unexpected disconnect (rc=%d). Auto-reconnect enabled.", rc)
 
     def _on_message(self, client, userdata, msg):
         actuator = msg.topic.split("/")[-1]
         payload  = msg.payload.decode()
-        print(f"[RPi] Command: {actuator} = {payload}")
+        logger.info("Command: %s = %s", actuator, payload)
 
     # ------------------------------------------------------------------
 
     def _publish(self, metric: str, value: float) -> None:
         topic = f"{self._topic_base}/{metric}"
         self._client.publish(topic, int(value), qos=1)
-        print(f"[RPi] {topic} = {value:.1f}")
+        logger.info("%s = %.1f", topic, value)
 
     def publish_readings(self) -> None:
-        if not self._connected:
+        if not self._connected.is_set():
             return
 
         dht = self._dht.read()
@@ -319,33 +332,31 @@ class RaspberryPiPlantNode:
 
     # ------------------------------------------------------------------
 
+    def request_shutdown(self):
+        """Signal the main loop to stop."""
+        self._shutdown.set()
+
     def run(self, interval: int = DEFAULT_PUBLISH_INTERVAL) -> None:
         try:
             self._client.connect(self.broker_host, self.broker_port, keepalive=60)
             self._client.loop_start()
 
-            deadline = time.time() + 10
-            while not self._connected and time.time() < deadline:
-                time.sleep(0.1)
-
-            if not self._connected:
-                print("[RPi] ERROR: Could not connect to MQTT broker")
+            if not self._connected.wait(timeout=10):
+                logger.error("Could not connect to MQTT broker within 10 s")
                 return
 
-            print(
-                f"[RPi] Running  "
-                f"greenhouse={self.greenhouse_id}  "
-                f"plant={self.plant_id}  "
-                f"interval={interval}s"
+            logger.info(
+                "Running  greenhouse=%d  plant=%d  interval=%ds",
+                self.greenhouse_id, self.plant_id, interval,
             )
-            print("Press Ctrl+C to stop.\n")
+            logger.info("Press Ctrl+C to stop.")
 
-            while True:
+            while not self._shutdown.is_set():
                 self.publish_readings()
-                time.sleep(interval)
+                self._shutdown.wait(timeout=interval)
 
         except KeyboardInterrupt:
-            print("\n[RPi] Stopping...")
+            logger.info("Stopping...")
         finally:
             self._client.loop_stop()
             self._client.disconnect()
@@ -354,7 +365,7 @@ class RaspberryPiPlantNode:
                     GPIO.cleanup()
                 except Exception:
                     pass
-            print("[RPi] Disconnected")
+            logger.info("Disconnected")
 
 
 # ------------------------------------------------------------------
@@ -362,6 +373,11 @@ class RaspberryPiPlantNode:
 # ------------------------------------------------------------------
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    )
+
     parser = argparse.ArgumentParser(
         description="Raspberry Pi Plant Node - reads sensors for one plant and publishes to MQTT",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -393,6 +409,15 @@ def main():
         ads_channel=args.ads_channel,
         co2_port=args.co2_port,
     )
+
+    # Graceful shutdown on SIGINT / SIGTERM
+    def _signal_handler(sig, frame):
+        logger.info("Received signal %d, shutting down...", sig)
+        node.request_shutdown()
+
+    signal.signal(signal.SIGINT,  _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     node.run(interval=args.interval)
 
 

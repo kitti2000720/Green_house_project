@@ -24,26 +24,26 @@ python3 sensor_simulator.py --greenhouse-ids 1,3,5 --plants 2
 
 import os
 import sys
-import time
+import signal
+import logging
 import argparse
+import threading
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    import paho.mqtt.client as mqtt
-except ImportError:
-    print("ERROR: paho-mqtt not installed. Run: pip install paho-mqtt")
-    sys.exit(1)
+import paho.mqtt.client as mqtt
 
-from config import (
+from sensors import (
     DEFAULT_MQTT_HOST,
     DEFAULT_MQTT_PORT,
     DEFAULT_NUM_GREENHOUSES,
     DEFAULT_NUM_PLANTS,
     DEFAULT_PUBLISH_INTERVAL,
 )
-from dynamics import PlantNodeDynamics
+from dynamics import PlantNodeDynamics, METRIC_NAMES
+
+logger = logging.getLogger("sensor_simulator")
 
 
 class SensorSimulator:
@@ -86,11 +86,14 @@ class SensorSimulator:
             for plant_id in range(1, num_plants + 1)
         }
 
+        self._connected = threading.Event()
+        self._shutdown  = threading.Event()
+
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message    = self._on_message
-        self._connected = False
+        self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
     # ------------------------------------------------------------------
     # MQTT callbacks
@@ -98,19 +101,19 @@ class SensorSimulator:
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc != 0:
-            print(f"[Simulator] Connection failed: rc={rc}")
+            logger.error("Connection failed: rc=%d", rc)
             return
-        self._connected = True
-        print(f"[Simulator] Connected to {self.broker_host}:{self.broker_port}")
+        self._connected.set()
+        logger.info("Connected to %s:%d", self.broker_host, self.broker_port)
 
         for (gh_id, plant_id) in self.nodes:
             client.subscribe(f"greenhouse/{gh_id}/plant/{plant_id}/pump")
             client.subscribe(f"greenhouse/{gh_id}/plant/{plant_id}/window")
 
     def _on_disconnect(self, client, userdata, rc):
-        self._connected = False
+        self._connected.clear()
         if rc != 0:
-            print(f"[Simulator] Unexpected disconnect: rc={rc}")
+            logger.warning("Unexpected disconnect (rc=%d). Auto-reconnect enabled.", rc)
 
     def _on_message(self, client, userdata, msg):
         """
@@ -136,10 +139,10 @@ class SensorSimulator:
 
         if actuator == "pump":
             node.set_pump(payload.upper() == "ON")
-            print(f"[Simulator] gh[{gh_id}]/plant[{plant_id}] pump -> {payload.upper()}")
+            logger.info("gh[%d]/plant[%d] pump -> %s", gh_id, plant_id, payload.upper())
         elif actuator == "window":
             node.set_window(payload.upper() == "OPEN")
-            print(f"[Simulator] gh[{gh_id}]/plant[{plant_id}] window -> {payload.upper()}")
+            logger.info("gh[%d]/plant[%d] window -> %s", gh_id, plant_id, payload.upper())
 
     # ------------------------------------------------------------------
     # Publishing
@@ -149,69 +152,61 @@ class SensorSimulator:
         self._client.publish(topic, int(value), qos=1)
 
     def _publish_all(self) -> None:
-        if not self._connected:
+        if not self._connected.is_set():
             return
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}]")
+        logger.info("[%s]", ts)
 
         for (gh_id, plant_id), node in sorted(self.nodes.items()):
             r    = node.readings
             base = f"greenhouse/{gh_id}/plant/{plant_id}"
 
-            self._publish(f"{base}/temp",     r["temp"])
-            self._publish(f"{base}/humidity", r["humidity"])
-            self._publish(f"{base}/co2",      r["co2"])
-            self._publish(f"{base}/soil",     r["soil"])
+            for metric in METRIC_NAMES:
+                self._publish(f"{base}/{metric}", r[metric])
 
-            print(
-                f"  gh[{gh_id}]/plant[{plant_id}]  "
-                f"temp={r['temp']:.1f}C  "
-                f"humidity={r['humidity']:.1f}%  "
-                f"co2={r['co2']:.0f}ppm  "
-                f"soil={r['soil']:.1f}%"
-            )
-        print()
+            parts = "  ".join(f"{m}={r[m]:.1f}" for m in METRIC_NAMES)
+            logger.info("  gh[%d]/plant[%d]  %s", gh_id, plant_id, parts)
 
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
+
+    def request_shutdown(self):
+        """Signal the main loop to stop."""
+        self._shutdown.set()
 
     def run(self, interval: int = DEFAULT_PUBLISH_INTERVAL) -> None:
         try:
             self._client.connect(self.broker_host, self.broker_port, keepalive=60)
             self._client.loop_start()
 
-            deadline = time.time() + 10
-            while not self._connected and time.time() < deadline:
-                time.sleep(0.1)
-
-            if not self._connected:
-                print("[Simulator] ERROR: Could not connect to MQTT broker")
+            if not self._connected.wait(timeout=10):
+                logger.error("Could not connect to MQTT broker within 10 s")
                 return
 
             total_nodes = len(self.nodes)
-            print(
-                f"[Simulator] Running  "
-                f"greenhouses={self.greenhouse_ids}  "
-                f"plants_per_greenhouse={self.num_plants}  "
-                f"total_nodes={total_nodes}  "
-                f"interval={interval}s"
+            logger.info(
+                "Running  greenhouses=%s  plants_per_greenhouse=%d  "
+                "total_nodes=%d  interval=%ds",
+                self.greenhouse_ids, self.num_plants, total_nodes, interval,
             )
-            print("Press Ctrl+C to stop.\n")
+            logger.info("Press Ctrl+C to stop.")
 
-            while True:
-                time.sleep(interval)
+            while not self._shutdown.is_set():
+                self._shutdown.wait(timeout=interval)
+                if self._shutdown.is_set():
+                    break
                 for node in self.nodes.values():
                     node.step()
                 self._publish_all()
 
         except KeyboardInterrupt:
-            print("\n[Simulator] Stopping...")
+            logger.info("Stopping...")
         finally:
             self._client.loop_stop()
             self._client.disconnect()
-            print("[Simulator] Disconnected")
+            logger.info("Disconnected")
 
 
 # ------------------------------------------------------------------
@@ -229,6 +224,11 @@ def _parse_greenhouse_ids(value: str) -> list:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    )
+
     parser = argparse.ArgumentParser(
         description="Greenhouse Sensor Simulator - simulates independent RPi plant nodes",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -268,6 +268,15 @@ def main():
         greenhouse_ids=greenhouse_ids,
         num_plants=args.plants,
     )
+
+    # Graceful shutdown on SIGINT / SIGTERM
+    def _signal_handler(sig, frame):
+        logger.info("Received signal %d, shutting down...", sig)
+        simulator.request_shutdown()
+
+    signal.signal(signal.SIGINT,  _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     simulator.run(interval=args.interval)
 
 
