@@ -1,5 +1,4 @@
 #include "mqtt_handler.h"
-#include "rules.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -9,11 +8,6 @@
 /* Add a new entry here to subscribe to an additional topic pattern.   */
 /* ------------------------------------------------------------------ */
 
-/*
- * Each Raspberry Pi publishes under greenhouse/{id}/plant/{plant_id}/
- * Subscribe to per-plant readings only - no shared env/ topics.
- * Add a new entry here to subscribe to an additional metric.
- */
 static const char *TOPIC_PATTERNS[] = {
     "greenhouse/%d/plant/+/soil",
     "greenhouse/%d/plant/+/temp",
@@ -56,23 +50,52 @@ static void on_disconnect(struct mosquitto *mosq, void *userdata, int rc)
     }
 }
 
+/*
+ * on_message - store the incoming reading in the shared snapshot.
+ *
+ * Rule evaluation is intentionally NOT done here.  The RT control thread
+ * reads the snapshot and applies rules on its own deterministic schedule,
+ * so that SCHED_FIFO priority actually governs when the rules run.
+ */
 static void on_message(struct mosquitto *mosq, void *userdata,
                        const struct mosquitto_message *msg)
 {
+    (void)mosq;
     if (!msg || !msg->payload) return;
 
     mqtt_context_t *ctx = (mqtt_context_t *)userdata;
 
-    /* Copy payload to a null-terminated buffer. */
-    char payload[256];
-    int  len = (msg->payloadlen < (int)sizeof(payload) - 1)
-                   ? msg->payloadlen
-                   : (int)sizeof(payload) - 1;
+    char payload[64];
+    int len = (msg->payloadlen < (int)sizeof(payload) - 1)
+                  ? msg->payloadlen : (int)sizeof(payload) - 1;
     memcpy(payload, msg->payload, len);
     payload[len] = '\0';
 
+    /* Extract plant_id from: greenhouse/{id}/plant/{plant_id}/... */
+    const char *ptr = strstr(msg->topic, "/plant/");
+    if (!ptr) return;
+    int plant_id = atoi(ptr + 7);
+    if (plant_id < 1 || plant_id > MAX_PLANTS) return;
+
+    int val = atoi(payload);
+
+    pthread_mutex_lock(&ctx->snapshot.lock);
+
+    if (strstr(msg->topic, "/soil")) {
+        ctx->snapshot.soil[plant_id]      = val;
+        ctx->snapshot.received[plant_id] |= 0x1;
+    } else if (strstr(msg->topic, "/temp")) {
+        ctx->snapshot.temp[plant_id]      = val;
+        ctx->snapshot.received[plant_id] |= 0x2;
+    } else if (strstr(msg->topic, "/co2")) {
+        ctx->snapshot.co2[plant_id]       = val;
+        ctx->snapshot.received[plant_id] |= 0x4;
+    }
+    ctx->snapshot.updated = 1;
+
+    pthread_mutex_unlock(&ctx->snapshot.lock);
+
     printf("[MQTT] %s = %s\n", msg->topic, payload);
-    rules_evaluate(mosq, ctx->greenhouse_id, msg->topic, payload);
 }
 
 /* ------------------------------------------------------------------ */
@@ -86,6 +109,8 @@ int mqtt_handler_init(mqtt_context_t *ctx,
 {
     ctx->greenhouse_id = greenhouse_id;
     ctx->connected     = 0;
+
+    pthread_mutex_init(&ctx->snapshot.lock, NULL);
 
     mosquitto_lib_init();
 
@@ -118,5 +143,6 @@ void mqtt_handler_cleanup(mqtt_context_t *ctx)
     mosquitto_loop_stop(ctx->mosq, true);
     mosquitto_destroy(ctx->mosq);
     mosquitto_lib_cleanup();
+    pthread_mutex_destroy(&ctx->snapshot.lock);
     ctx->mosq = NULL;
 }

@@ -235,3 +235,6 @@ greenhouse/
 | Dashboard nem tölt be adatot | Ellenőrizd a mosquitto.conf-ban a WebSocket listener port 9001-et |
 | Firebase: `Permission denied` | Firebase Console > Realtime Database > Rules > test mode |
 | RPi nem csatlakozik | Ellenőrizd a `--host` paramétert (WSL IP kell, nem localhost) |
+
+
+ssh erts2026@10.157.157.105

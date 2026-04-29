@@ -1,7 +1,6 @@
 #include "rules.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
@@ -19,73 +18,56 @@ static void publish(struct mosquitto *mosq,
     }
 }
 
-/*
- * Extract the plant ID from a topic of the form
- * "greenhouse/<id>/plant/<plant_id>/..."
- *
- * Returns the plant ID, or -1 if the pattern is not found.
- */
-static int extract_plant_id(const char *topic)
-{
-    const char *ptr = strstr(topic, "/plant/");
-    if (!ptr) return -1;
-    int id = atoi(ptr + 7);   /* skip "/plant/" */
-    return (id > 0) ? id : -1;
-}
-
 /* ------------------------------------------------------------------ */
 /* Rule evaluation                                                      */
 /* ------------------------------------------------------------------ */
 
-void rules_evaluate(struct mosquitto *mosq,
-                    int               greenhouse_id,
-                    const char       *topic,
-                    const char       *payload)
+/*
+ * rules_evaluate_snapshot - called by the RT thread every control cycle.
+ *
+ * The snapshot is a local copy taken under the mutex in the main loop,
+ * so this function runs fully lock-free and with bounded execution time.
+ *
+ * Each rule checks one metric and publishes one actuator command when
+ * the threshold is crossed.  Only metrics marked as received are checked.
+ */
+void rules_evaluate_snapshot(struct mosquitto         *mosq,
+                              int                       greenhouse_id,
+                              int                       plant_id,
+                              const sensor_snapshot_t  *snap)
 {
     char out_topic[128];
 
-    /* --- RULE_SOIL: low moisture -> turn pump ON ------------------- */
-    if (strstr(topic, "/soil")) {
-        int moisture = atoi(payload);
-        if (moisture < RULE_SOIL_MOISTURE_MIN) {
-            int plant_id = extract_plant_id(topic);
-            if (plant_id < 1) return;
-
-            snprintf(out_topic, sizeof(out_topic),
-                     "greenhouse/%d/plant/%d/pump", greenhouse_id, plant_id);
-
-            printf("[Rules] RULE_SOIL: plant=%d  moisture=%d%% < %d%%  -> pump ON\n",
-                   plant_id, moisture, RULE_SOIL_MOISTURE_MIN);
-            publish(mosq, out_topic, "ON", 1);
-        }
-        return;
+    /* RULE_SOIL: low moisture -> pump ON */
+    if ((snap->received[plant_id] & 0x1) &&
+        snap->soil[plant_id] < RULE_SOIL_MOISTURE_MIN)
+    {
+        snprintf(out_topic, sizeof(out_topic),
+                 "greenhouse/%d/plant/%d/pump", greenhouse_id, plant_id);
+        printf("[Rules] RULE_SOIL: plant=%d  moisture=%d%% < %d%%  -> pump ON\n",
+               plant_id, snap->soil[plant_id], RULE_SOIL_MOISTURE_MIN);
+        publish(mosq, out_topic, "ON", 1);
     }
 
-    /* --- RULE_TEMP: high temperature -> open ventilation window ---- */
-    if (strstr(topic, "/temp")) {
-        int temp = atoi(payload);
-        if (temp > RULE_TEMP_MAX) {
-            snprintf(out_topic, sizeof(out_topic),
-                     "greenhouse/%d/actuators/window", greenhouse_id);
-
-            printf("[Rules] RULE_TEMP: temp=%dC > %dC  -> window OPEN\n",
-                   temp, RULE_TEMP_MAX);
-            publish(mosq, out_topic, "OPEN", 1);
-        }
-        return;
+    /* RULE_TEMP: high temperature -> window OPEN */
+    if ((snap->received[plant_id] & 0x2) &&
+        snap->temp[plant_id] > RULE_TEMP_MAX)
+    {
+        snprintf(out_topic, sizeof(out_topic),
+                 "greenhouse/%d/plant/%d/window", greenhouse_id, plant_id);
+        printf("[Rules] RULE_TEMP: plant=%d  temp=%dC > %dC  -> window OPEN\n",
+               plant_id, snap->temp[plant_id], RULE_TEMP_MAX);
+        publish(mosq, out_topic, "OPEN", 1);
     }
 
-    /* --- RULE_CO2: high CO2 -> trigger alarm ----------------------- */
-    if (strstr(topic, "/co2")) {
-        int co2 = atoi(payload);
-        if (co2 > RULE_CO2_MAX) {
-            snprintf(out_topic, sizeof(out_topic),
-                     "greenhouse/%d/status/alarm", greenhouse_id);
-
-            printf("[Rules] RULE_CO2: co2=%dppm > %dppm  -> alarm CRITICAL\n",
-                   co2, RULE_CO2_MAX);
-            publish(mosq, out_topic, "CRITICAL", 1);
-        }
-        return;
+    /* RULE_CO2: critical CO2 -> alarm */
+    if ((snap->received[plant_id] & 0x4) &&
+        snap->co2[plant_id] > RULE_CO2_MAX)
+    {
+        snprintf(out_topic, sizeof(out_topic),
+                 "greenhouse/%d/status/alarm", greenhouse_id);
+        printf("[Rules] RULE_CO2: plant=%d  co2=%dppm > %dppm  -> alarm CRITICAL\n",
+               plant_id, snap->co2[plant_id], RULE_CO2_MAX);
+        publish(mosq, out_topic, "CRITICAL", 1);
     }
 }
