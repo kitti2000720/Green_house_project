@@ -66,7 +66,7 @@ try:
 except ImportError:
     _GPIO_AVAILABLE = False
 
-from sensors import (
+from config import (
     DEFAULT_MQTT_HOST,
     DEFAULT_MQTT_PORT,
     DEFAULT_GREENHOUSE_ID,

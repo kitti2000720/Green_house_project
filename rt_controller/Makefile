@@ -1,5 +1,5 @@
 CC      = gcc
-CFLAGS  = -Wall -Wextra -O2 -std=c99
+CFLAGS  = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200112L
 LDFLAGS = -lmosquitto -lpthread -lrt
 TARGET  = greenhouse_controller
 

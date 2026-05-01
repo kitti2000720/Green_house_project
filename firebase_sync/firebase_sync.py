@@ -27,7 +27,7 @@ except ImportError:
     print("ERROR: paho-mqtt not installed. Run: pip install paho-mqtt")
     sys.exit(1)
 
-from firebase_sync import MQTT_HOST, MQTT_PORT, GREENHOUSE_ID, FIREBASE_URL, EVENT_BUFFER_SIZE
+from config import MQTT_HOST, MQTT_PORT, GREENHOUSE_ID, FIREBASE_URL, EVENT_BUFFER_SIZE
 from firebase_client import FirebaseClient
 from topic_parser import parse_topic, check_alerts
 

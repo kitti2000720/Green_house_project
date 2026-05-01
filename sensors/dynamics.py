@@ -12,6 +12,8 @@ Call step() once per simulation tick to advance the state.
 
 import random
 
+METRIC_NAMES = ["temp", "humidity", "co2", "soil"]
+
 
 class PlantNodeDynamics:
     """
