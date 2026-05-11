@@ -117,11 +117,9 @@ static void *rt_control_loop(void *arg)
         /* Only evaluate rules when new sensor data has arrived. */
         if (!snap.updated) continue;
 
-        for (int plant_id = 1; plant_id <= MAX_PLANTS; plant_id++) {
-            if (snap.received[plant_id] == 0) continue;
-            rules_evaluate_snapshot(ctx->mosq, ctx->greenhouse_id,
-                                    plant_id, &snap);
-        }
+        /* Pass actuator state so rules only publish on state change. */
+        rules_evaluate_snapshot(ctx->mosq, ctx->greenhouse_id,
+                                &snap, &ctx->actuators);
     }
 
     printf("[RT] Loop stopped.  cycles=%ld  max_jitter=%ld us\n",

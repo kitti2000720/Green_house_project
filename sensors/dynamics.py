@@ -53,8 +53,9 @@ class PlantNodeDynamics:
         self.co2      = initial_co2      if initial_co2      is not None else random.uniform(700.0, 900.0)
         self.soil     = initial_soil     if initial_soil     is not None else random.uniform(40.0,  70.0)
 
-        self.pump_on     = False
-        self.window_open = False
+        self.pump_on      = False
+        self.window_open  = False
+        self.co2_enricher = False
 
     # ------------------------------------------------------------------
     # Actuator control
@@ -65,6 +66,9 @@ class PlantNodeDynamics:
 
     def set_window(self, open_state: bool) -> None:
         self.window_open = open_state
+
+    def set_co2_enricher(self, on: bool) -> None:
+        self.co2_enricher = on
 
     # ------------------------------------------------------------------
     # Simulation step
@@ -85,11 +89,14 @@ class PlantNodeDynamics:
         else:
             self.humidity += random.uniform(0.0, 0.5)
 
-        # CO2: rises naturally (plant respiration), drops when window opens
+        # CO2: rises naturally (respiration), drops when window opens.
+        # CO2 enricher injects CO2 to boost photosynthesis (only when window closed).
         if self.window_open:
             self.co2 -= random.uniform(10.0, 30.0)
+        elif self.co2_enricher:
+            self.co2 += random.uniform(20.0, 40.0)   # active injection
         else:
-            self.co2 += random.uniform(5.0, 20.0)
+            self.co2 += random.uniform(5.0, 20.0)    # natural respiration
 
         # Soil moisture: rises when pump is on, dries out otherwise
         if self.pump_on:

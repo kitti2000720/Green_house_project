@@ -73,17 +73,24 @@ class SensorSimulator:
         broker_port: int      = DEFAULT_MQTT_PORT,
         greenhouse_ids: list  = None,
         num_plants: int       = DEFAULT_NUM_PLANTS,
+        plant_ids: list       = None,
     ):
         self.broker_host    = broker_host
         self.broker_port    = broker_port
         self.greenhouse_ids = greenhouse_ids or [1]
         self.num_plants     = num_plants
 
-        # Keyed by (greenhouse_id, plant_id) so every node is independent
+        effective_plant_ids = plant_ids if plant_ids else list(range(1, num_plants + 1))
+
+        # Keyed by (greenhouse_id, plant_id) so every node is independent.
+        # Each greenhouse gets a distinct environment so that rules fire
+        # at different times and the demo shows real variation.
         self.nodes: dict = {
-            (gh_id, plant_id): PlantNodeDynamics()
+            (gh_id, plant_id): PlantNodeDynamics(
+                **self._initial_conditions(gh_id)
+            )
             for gh_id    in self.greenhouse_ids
-            for plant_id in range(1, num_plants + 1)
+            for plant_id in effective_plant_ids
         }
 
         self._connected = threading.Event()
@@ -96,6 +103,33 @@ class SensorSimulator:
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
     # ------------------------------------------------------------------
+    # Per-greenhouse initial conditions
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _initial_conditions(gh_id: int) -> dict:
+        """Return distinct initial sensor values per greenhouse.
+
+        Odd IDs  → cool, moist, low CO2 (stable baseline)
+        Even IDs → hot, dry, elevated CO2 (rules fire quickly for demo)
+        """
+        import random
+        if gh_id % 2 == 0:
+            return dict(
+                initial_temp=random.uniform(30.0, 36.0),
+                initial_humidity=random.uniform(30.0, 45.0),
+                initial_co2=random.uniform(1200.0, 1600.0),
+                initial_soil=random.uniform(10.0, 25.0),
+            )
+        else:
+            return dict(
+                initial_temp=random.uniform(18.0, 23.0),
+                initial_humidity=random.uniform(65.0, 80.0),
+                initial_co2=random.uniform(600.0, 850.0),
+                initial_soil=random.uniform(55.0, 75.0),
+            )
+
+    # ------------------------------------------------------------------
     # MQTT callbacks
     # ------------------------------------------------------------------
 
@@ -106,9 +140,13 @@ class SensorSimulator:
         self._connected.set()
         logger.info("Connected to %s:%d", self.broker_host, self.broker_port)
 
+        for gh_id in self.greenhouse_ids:
+            # Greenhouse-level actuators
+            client.subscribe(f"greenhouse/{gh_id}/window")
+            client.subscribe(f"greenhouse/{gh_id}/co2_enricher")
         for (gh_id, plant_id) in self.nodes:
+            # Per-plant: each plant has its own pump
             client.subscribe(f"greenhouse/{gh_id}/plant/{plant_id}/pump")
-            client.subscribe(f"greenhouse/{gh_id}/plant/{plant_id}/window")
 
     def _on_disconnect(self, client, userdata, rc):
         self._connected.clear()
@@ -116,16 +154,37 @@ class SensorSimulator:
             logger.warning("Unexpected disconnect (rc=%d). Auto-reconnect enabled.", rc)
 
     def _on_message(self, client, userdata, msg):
-        """
-        Handle actuator commands and forward them to the correct node.
-        Expected topic: greenhouse/{gh_id}/plant/{plant_id}/{actuator}
-        """
+        """Handle actuator commands from the RT controller."""
         parts = msg.topic.split("/")
-        # greenhouse / {gh_id} / plant / {plant_id} / {actuator}
-        if len(parts) != 5:
+        if len(parts) < 3 or parts[0] != "greenhouse":
             return
         try:
-            gh_id    = int(parts[1])
+            gh_id = int(parts[1])
+        except ValueError:
+            return
+
+        # greenhouse/{gh_id}/window  — shared window for all plants
+        if len(parts) == 3 and parts[2] == "window":
+            state = msg.payload.decode().upper() == "OPEN"
+            for (g, _), node in self.nodes.items():
+                if g == gh_id:
+                    node.set_window(state)
+            logger.info("gh[%d] window -> %s", gh_id, msg.payload.decode().upper())
+            return
+
+        # greenhouse/{gh_id}/co2_enricher — CO2 injection for all plants
+        if len(parts) == 3 and parts[2] == "co2_enricher":
+            enriching = msg.payload.decode().upper() == "ON"
+            for (g, _), node in self.nodes.items():
+                if g == gh_id:
+                    node.set_co2_enricher(enriching)
+            logger.info("gh[%d] co2_enricher -> %s", gh_id, msg.payload.decode().upper())
+            return
+
+        # greenhouse/{gh_id}/plant/{plant_id}/{actuator}
+        if len(parts) != 5 or parts[2] != "plant":
+            return
+        try:
             plant_id = int(parts[3])
         except ValueError:
             return
@@ -140,9 +199,6 @@ class SensorSimulator:
         if actuator == "pump":
             node.set_pump(payload.upper() == "ON")
             logger.info("gh[%d]/plant[%d] pump -> %s", gh_id, plant_id, payload.upper())
-        elif actuator == "window":
-            node.set_window(payload.upper() == "OPEN")
-            logger.info("gh[%d]/plant[%d] window -> %s", gh_id, plant_id, payload.upper())
 
     # ------------------------------------------------------------------
     # Publishing
@@ -255,6 +311,12 @@ def main():
         help="Explicit list of greenhouse IDs to simulate",
     )
 
+    parser.add_argument(
+        "--plant-ids", type=_parse_greenhouse_ids, default=None,
+        metavar="2,3",
+        help="Explicit list of plant IDs to simulate (default: 1..--plants)",
+    )
+
     args = parser.parse_args()
 
     if args.greenhouse_ids is not None:
@@ -267,6 +329,7 @@ def main():
         broker_port=args.port,
         greenhouse_ids=greenhouse_ids,
         num_plants=args.plants,
+        plant_ids=args.plant_ids,
     )
 
     # Graceful shutdown on SIGINT / SIGTERM

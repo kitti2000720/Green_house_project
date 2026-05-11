@@ -33,6 +33,8 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from dynamics import PlantNodeDynamics
+
 try:
     import paho.mqtt.client as mqtt
 except ImportError:
@@ -40,14 +42,29 @@ except ImportError:
     sys.exit(1)
 
 try:
-    import Adafruit_DHT
-    _DHT_AVAILABLE = True
+    from sense_hat import SenseHat as _SenseHat
+    _SENSEHAT_AVAILABLE = True
 except ImportError:
-    _DHT_AVAILABLE = False
+    _SENSEHAT_AVAILABLE = False
+
+try:
+    import adafruit_dht
+    import board as _dht_board
+    _DHT_AVAILABLE = True
+    _DHT_LEGACY    = False
+except ImportError:
+    try:
+        import Adafruit_DHT
+        _DHT_AVAILABLE = True
+        _DHT_LEGACY    = True
+    except ImportError:
+        _DHT_AVAILABLE = False
+        _DHT_LEGACY    = False
 
 try:
     import board
     import busio
+    import adafruit_ads1x15.ads1115 as _ADS_MOD
     from adafruit_ads1x15.ads1115 import ADS1115
     from adafruit_ads1x15.analog_in import AnalogIn
     _ADS_AVAILABLE = True
@@ -110,6 +127,41 @@ def _validate(value: float, valid_range: tuple, name: str) -> float | None:
 # Sensor driver classes
 # ------------------------------------------------------------------
 
+class SenseHatReader:
+    """Reads temperature and humidity from a Raspberry Pi Sense HAT."""
+
+    def __init__(self):
+        self._available = _SENSEHAT_AVAILABLE
+        self._sense     = None
+        if self._available:
+            try:
+                self._sense = _SenseHat()
+                self._sense.clear()
+                logger.info("[SenseHAT] Initialised")
+            except Exception as exc:
+                logger.warning("[SenseHAT] Init failed: %s", exc)
+                self._available = False
+        else:
+            logger.warning("[SenseHAT] sense-hat not available. Install: pip install sense-hat")
+
+    def read(self) -> dict:
+        """Return {temp, humidity} from Sense HAT sensors, or {} on failure."""
+        if not self._available:
+            return {}
+        try:
+            temp     = self._sense.get_temperature()
+            humidity = self._sense.get_humidity()
+
+            t = _validate(temp,     VALID_TEMP_RANGE,     "temp")
+            h = _validate(humidity, VALID_HUMIDITY_RANGE, "humidity")
+            if t is None or h is None:
+                return {}
+            return {"temp": round(t, 1), "humidity": round(h, 1)}
+        except Exception as exc:
+            logger.error("[SenseHAT] Read error: %s", exc)
+            return {}
+
+
 class DHT22Reader:
     """Reads temperature and humidity from a DHT22 sensor via GPIO."""
 
@@ -117,20 +169,31 @@ class DHT22Reader:
         self._pin          = gpio_pin
         self._available    = _DHT_AVAILABLE
         self._error_count  = 0
+        self._sensor       = None
         if self._available:
-            logger.info("[DHT22] Configured on GPIO %d", gpio_pin)
+            if not _DHT_LEGACY:
+                try:
+                    pin = getattr(_dht_board, f"D{gpio_pin}")
+                    self._sensor = adafruit_dht.DHT22(pin)
+                except Exception as exc:
+                    logger.warning("[DHT22] Init failed: %s", exc)
+                    self._available = False
+                    return
+            logger.info("[DHT22] Configured on GPIO %d (legacy=%s)", gpio_pin, _DHT_LEGACY)
         else:
-            logger.warning("[DHT22] Adafruit_DHT not available.")
+            logger.warning("[DHT22] DHT library not available.")
 
     def read(self) -> dict:
-        """
-        Return validated {temp, humidity} or {} on failure.
-        Logs a warning after MAX_CONSECUTIVE_ERRORS consecutive failures.
-        """
+        """Return validated {temp, humidity} or {} on failure."""
         if not self._available:
             return {}
         try:
-            humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT22, self._pin)
+            if _DHT_LEGACY:
+                humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT22, self._pin)
+            else:
+                temperature = self._sensor.temperature
+                humidity    = self._sensor.humidity
+
             if humidity is None or temperature is None:
                 raise ValueError("DHT22 returned None")
 
@@ -143,21 +206,19 @@ class DHT22Reader:
             self._error_count = 0
             return {"temp": temp, "humidity": hum}
 
-        except Exception as exc:
+        except Exception:
             self._error_count += 1
-            logger.error("[DHT22] Read error (attempt %d): %s", self._error_count, exc)
-            if self._error_count >= MAX_CONSECUTIVE_ERRORS:
-                logger.warning(
-                    "[DHT22] %d consecutive failures. Check sensor wiring on GPIO %d.",
-                    self._error_count, self._pin,
-                )
+            if self._error_count == MAX_CONSECUTIVE_ERRORS:
+                logger.warning("[DHT22] No sensor found on GPIO %d — using simulation fallback.",
+                               self._pin)
+                self._available = False   # stop retrying
         return {}
 
 
 class SoilMoistureReader:
     """Reads soil moisture from a capacitive sensor via ADS1115 ADC."""
 
-    _CHANNEL_PINS = [ADS1115.P0, ADS1115.P1, ADS1115.P2, ADS1115.P3] if _ADS_AVAILABLE else []
+    _CHANNEL_PINS = [0, 1, 2, 3]
 
     def __init__(self, i2c_address: int, channel: int):
         self._channel     = channel
@@ -206,11 +267,22 @@ class CO2SensorReader:
             logger.warning("[MH-Z19] mh_z19 not available. Install: pip install mh-z19")
 
     def read(self) -> int | None:
-        """Return CO2 in ppm, or None on failure."""
+        """Return CO2 in ppm, or None on failure. Disables itself after too many errors."""
         if not self._available:
             return None
+        import os, io
         try:
-            result = mh_z19.read(serial_console_untouched=True)
+            # Redirect stderr to suppress mh_z19's internal traceback output
+            devnull = open(os.devnull, 'w')
+            old_stderr = os.dup(2)
+            os.dup2(devnull.fileno(), 2)
+            try:
+                result = mh_z19.read(serial_console_untouched=True)
+            finally:
+                os.dup2(old_stderr, 2)
+                os.close(old_stderr)
+                devnull.close()
+
             if not result or "co2" not in result:
                 raise ValueError("Empty response from MH-Z19")
             co2 = int(result["co2"])
@@ -221,12 +293,10 @@ class CO2SensorReader:
             return int(validated)
         except Exception as exc:
             self._error_count += 1
-            logger.error("[MH-Z19] Read error (attempt %d): %s", self._error_count, exc)
-            if self._error_count >= MAX_CONSECUTIVE_ERRORS:
-                logger.warning(
-                    "[MH-Z19] %d consecutive failures. Check serial port %s.",
-                    self._error_count, self._port,
-                )
+            if self._error_count == MAX_CONSECUTIVE_ERRORS:
+                logger.warning("[MH-Z19] No sensor found on %s — using simulation fallback.",
+                               self._port)
+                self._available = False   # stop retrying
         return None
 
 
@@ -271,9 +341,12 @@ class RaspberryPiPlantNode:
 
         self._topic_base = f"greenhouse/{greenhouse_id}/plant/{plant_id}"
 
-        self._dht  = DHT22Reader(dht_pin)
-        self._soil = SoilMoistureReader(ads_address, ads_channel)
+        self._sense = SenseHatReader()
+        self._dht   = DHT22Reader(dht_pin)    # fallback if no Sense HAT
+        self._soil  = SoilMoistureReader(ads_address, ads_channel)
         self._co2  = CO2SensorReader(co2_port)
+
+        self._dynamics = PlantNodeDynamics()
 
         self._connected = threading.Event()
         self._shutdown  = threading.Event()
@@ -291,7 +364,8 @@ class RaspberryPiPlantNode:
             self._connected.set()
             logger.info("Connected to %s:%d", self.broker_host, self.broker_port)
             client.subscribe(f"{self._topic_base}/pump")
-            client.subscribe(f"{self._topic_base}/window")
+            client.subscribe(f"greenhouse/{self.greenhouse_id}/window")
+            client.subscribe(f"greenhouse/{self.greenhouse_id}/co2_enricher")
         else:
             logger.error("Connection failed: rc=%d", rc)
 
@@ -301,9 +375,16 @@ class RaspberryPiPlantNode:
             logger.warning("Unexpected disconnect (rc=%d). Auto-reconnect enabled.", rc)
 
     def _on_message(self, client, userdata, msg):
-        actuator = msg.topic.split("/")[-1]
+        parts    = msg.topic.split("/")
+        actuator = parts[-1]
         payload  = msg.payload.decode()
         logger.info("Command: %s = %s", actuator, payload)
+        if actuator == "pump":
+            self._dynamics.set_pump(payload.upper() == "ON")
+        elif actuator == "window":
+            self._dynamics.set_window(payload.upper() == "OPEN")
+        elif actuator == "co2_enricher":
+            self._dynamics.set_co2_enricher(payload.upper() == "ON")
 
     # ------------------------------------------------------------------
 
@@ -316,19 +397,22 @@ class RaspberryPiPlantNode:
         if not self._connected.is_set():
             return
 
-        dht = self._dht.read()
-        if "temp" in dht:
-            self._publish("temp",     dht["temp"])
-        if "humidity" in dht:
-            self._publish("humidity", dht["humidity"])
+        self._dynamics.step()
+        sim = self._dynamics.readings
+
+        # Sense HAT is primary; DHT22 is fallback; simulation is last resort
+        sense = self._sense.read()
+        dht   = self._dht.read() if not sense else {}
+        temp  = sense.get("temp")     or dht.get("temp")
+        hum   = sense.get("humidity") or dht.get("humidity")
+        self._publish("temp",     temp if temp is not None else sim["temp"])
+        self._publish("humidity", hum  if hum  is not None else sim["humidity"])
 
         soil = self._soil.read()
-        if soil is not None:
-            self._publish("soil", soil)
+        self._publish("soil", soil if soil is not None else sim["soil"])
 
         co2 = self._co2.read()
-        if co2 is not None:
-            self._publish("co2", co2)
+        self._publish("co2",  co2  if co2  is not None else sim["co2"])
 
     # ------------------------------------------------------------------
 

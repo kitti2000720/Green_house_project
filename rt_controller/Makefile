@@ -17,7 +17,7 @@ all: $(TARGET)
 $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-%.o: %.c
+%.o: %.c mqtt_handler.h rules.h
 	$(CC) $(CFLAGS) -c $<
 
 clean:

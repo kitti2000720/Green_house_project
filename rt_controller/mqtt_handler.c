@@ -1,6 +1,7 @@
 #include "mqtt_handler.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
@@ -111,6 +112,14 @@ int mqtt_handler_init(mqtt_context_t *ctx,
     ctx->connected     = 0;
 
     pthread_mutex_init(&ctx->snapshot.lock, NULL);
+
+    /* All actuator states start as unknown so the first evaluation
+     * always publishes the initial command. */
+    ctx->actuators.window       = ACT_UNKNOWN;
+    ctx->actuators.co2_enricher = ACT_UNKNOWN;
+    ctx->actuators.alarm        = ACT_UNKNOWN;
+    for (int i = 0; i <= MAX_PLANTS; i++)
+        ctx->actuators.pump[i] = ACT_UNKNOWN;
 
     mosquitto_lib_init();
 
