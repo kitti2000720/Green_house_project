@@ -8,6 +8,7 @@ the SDK is not installed, all write methods silently become no-ops
 """
 
 import time
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,8 @@ try:
     _SDK_AVAILABLE = True
 except ImportError:
     _SDK_AVAILABLE = False
+
+logger = logging.getLogger("firebase_client")
 
 
 class FirebaseClient:
@@ -37,21 +40,21 @@ class FirebaseClient:
         self._app  = None
 
         if not _SDK_AVAILABLE:
-            print("[Firebase] SDK not installed. Run: pip install firebase-admin")
+            logger.warning("Firebase SDK not installed. Run: pip install firebase-admin")
             return
 
         if not credentials_path:
-            print("[Firebase] No credentials path provided. Running in demo mode.")
+            logger.info("No credentials path provided. Running in demo mode.")
             return
 
         try:
             cred       = credentials.Certificate(credentials_path)
             self._app  = firebase_admin.initialize_app(cred, {"databaseURL": database_url})
             self.ready = True
-            print(f"[Firebase] Connected to {database_url}")
+            logger.info("Connected to %s", database_url)
         except Exception as exc:
-            print(f"[Firebase] Init error: {exc}")
-            print("[Firebase] Running in demo mode.")
+            logger.error("Init error: %s", exc)
+            logger.info("Running in demo mode.")
 
     # ------------------------------------------------------------------
     # Write operations
@@ -72,7 +75,7 @@ class FirebaseClient:
                 {topic: {"value": value, "timestamp": timestamp}}
             )
         except Exception as exc:
-            print(f"[Firebase] write_latest error: {exc}")
+            logger.error("write_latest error: %s", exc)
 
     def write_event(self, greenhouse_id: int, record: Dict[str, Any]) -> None:
         """Append a single timestamped event."""
@@ -82,7 +85,7 @@ class FirebaseClient:
             key = int(time.time() * 1000)
             firebase_db.reference(f"greenhouse/{greenhouse_id}/events/{key}").set(record)
         except Exception as exc:
-            print(f"[Firebase] write_event error: {exc}")
+            logger.error("write_event error: %s", exc)
 
     def write_batch(self, greenhouse_id: int, events: List[Dict[str, Any]]) -> None:
         """Flush a batch of buffered events."""
@@ -97,9 +100,9 @@ class FirebaseClient:
                 "timestamp": datetime.now().isoformat(),
                 "events":    events[-10:],
             })
-            print(f"[Firebase] Batch flushed ({len(events)} events)")
+            logger.info("Batch flushed (%d events)", len(events))
         except Exception as exc:
-            print(f"[Firebase] write_batch error: {exc}")
+            logger.error("write_batch error: %s", exc)
 
     # ------------------------------------------------------------------
 

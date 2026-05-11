@@ -13,8 +13,10 @@ nothing is written to Firebase.
 
 import os
 import sys
-import time
+import signal
+import logging
 import argparse
+import threading
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +30,8 @@ except ImportError:
 from config import MQTT_HOST, MQTT_PORT, GREENHOUSE_ID, FIREBASE_URL, EVENT_BUFFER_SIZE
 from firebase_client import FirebaseClient
 from topic_parser import parse_topic, check_alerts
+
+logger = logging.getLogger("firebase_sync")
 
 
 class FirebaseSyncService:
@@ -70,12 +74,14 @@ class FirebaseSyncService:
 
         self._firebase      = FirebaseClient(credentials_path, firebase_url)
         self._event_buffer  = []
-        self._connected     = False
+        self._connected     = threading.Event()
+        self._shutdown      = threading.Event()
 
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message    = self._on_message
+        self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
     # ------------------------------------------------------------------
     # MQTT callbacks
@@ -83,22 +89,22 @@ class FirebaseSyncService:
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc != 0:
-            print(f"[Sync] MQTT connection failed: rc={rc}")
+            logger.error("MQTT connection failed: rc=%d", rc)
             return
 
-        self._connected = True
-        print(f"[Sync] MQTT connected to {self.mqtt_host}:{self.mqtt_port}")
+        self._connected.set()
+        logger.info("MQTT connected to %s:%d", self.mqtt_host, self.mqtt_port)
 
         for gh_id in self.greenhouse_ids:
             for pattern in self.SUBSCRIPTIONS:
                 topic = pattern.format(id=gh_id)
                 client.subscribe(topic)
-                print(f"[Sync] Subscribed: {topic}")
+                logger.info("Subscribed: %s", topic)
 
     def _on_disconnect(self, client, userdata, rc):
-        self._connected = False
+        self._connected.clear()
         if rc != 0:
-            print(f"[Sync] MQTT unexpected disconnect: rc={rc}")
+            logger.warning("MQTT unexpected disconnect (rc=%d). Auto-reconnect enabled.", rc)
 
     def _on_message(self, client, userdata, msg):
         topic     = msg.topic
@@ -106,7 +112,7 @@ class FirebaseSyncService:
         timestamp = datetime.now().isoformat()
         mode      = "LIVE" if self._firebase.ready else "DEMO"
 
-        print(f"[{timestamp}] [{mode}] {topic} = {payload}")
+        logger.info("[%s] %s = %s", mode, topic, payload)
 
         record = {"timestamp": timestamp, "topic": topic, "value": payload}
 
@@ -119,52 +125,53 @@ class FirebaseSyncService:
 
         self._event_buffer.append(record)
         if len(self._event_buffer) >= EVENT_BUFFER_SIZE:
-            self._flush_buffer()
+            self._flush_buffer(gh_id)
 
         parsed = parse_topic(topic, payload, gh_id)
         for alert in check_alerts(parsed):
-            print(f"[Sync] ALERT [{alert['severity'].upper()}]: {alert['message']}")
+            logger.warning("ALERT [%s]: %s", alert['severity'].upper(), alert['message'])
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _flush_buffer(self) -> None:
-        self._firebase.write_batch(self.greenhouse_id, self._event_buffer)
+    def _flush_buffer(self, greenhouse_id: int = None) -> None:
+        gh_id = greenhouse_id if greenhouse_id is not None else self.greenhouse_ids[0]
+        self._firebase.write_batch(gh_id, self._event_buffer)
         self._event_buffer.clear()
 
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
+    def request_shutdown(self):
+        """Signal the main loop to stop."""
+        self._shutdown.set()
+
     def run(self) -> None:
         try:
             self._client.connect(self.mqtt_host, self.mqtt_port, keepalive=60)
             self._client.loop_start()
 
-            deadline = time.time() + 10
-            while not self._connected and time.time() < deadline:
-                time.sleep(0.1)
-
-            if not self._connected:
-                print("[Sync] ERROR: Could not connect to MQTT broker")
+            if not self._connected.wait(timeout=10):
+                logger.error("Could not connect to MQTT broker within 10 s")
                 return
 
             mode = "LIVE" if self._firebase.ready else "DEMO"
-            print(f"\n[Sync] Running [{mode}] - listening for events...\n")
+            logger.info("Running [%s] - listening for events...", mode)
 
-            while True:
-                time.sleep(5)
+            while not self._shutdown.is_set():
+                self._shutdown.wait(timeout=5)
 
         except KeyboardInterrupt:
-            print("\n[Sync] Stopping...")
+            logger.info("Stopping...")
         finally:
             self._client.loop_stop()
             self._client.disconnect()
             if self._event_buffer:
                 self._flush_buffer()
             self._firebase.cleanup()
-            print("[Sync] Disconnected")
+            logger.info("Disconnected")
 
 
 # ------------------------------------------------------------------
@@ -172,6 +179,11 @@ class FirebaseSyncService:
 # ------------------------------------------------------------------
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    )
+
     parser = argparse.ArgumentParser(description="Greenhouse Firebase Sync Service")
     parser.add_argument("--mqtt-host",      default=MQTT_HOST,
                         help="MQTT broker host (default: %(default)s)")
@@ -190,7 +202,7 @@ def main():
     try:
         greenhouse_ids = [int(x.strip()) for x in args.greenhouse_ids.split(",") if x.strip()]
     except ValueError:
-        print(f"ERROR: Invalid --greenhouse-ids value: '{args.greenhouse_ids}'")
+        logger.error("Invalid --greenhouse-ids value: '%s'", args.greenhouse_ids)
         sys.exit(1)
 
     service = FirebaseSyncService(
@@ -200,6 +212,15 @@ def main():
         credentials_path=args.credentials,
         firebase_url=args.firebase_url,
     )
+
+    # Graceful shutdown on SIGINT / SIGTERM
+    def _signal_handler(sig, frame):
+        logger.info("Received signal %d, shutting down...", sig)
+        service.request_shutdown()
+
+    signal.signal(signal.SIGINT,  _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     service.run()
 
 

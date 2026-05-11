@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Greenhouse Control Dashboard</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/mqttws31.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/paho-mqtt@1.1.0/paho-mqtt.min.js"></script>
     <style>
         /* ============================================================
            Base
@@ -178,6 +178,44 @@
         .btn:hover { opacity: 0.82; }
         .btn-on  { background: #4caf50; }
         .btn-off { background: #e53935; }
+        .btn-win-open  { background: #1976d2; }
+        .btn-win-close { background: #546e7a; }
+
+        /* Window state badge */
+        .win-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+        }
+        .win-badge.open   { background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; }
+        .win-badge.closed { background: #eceff1; color: #37474f; border: 1px solid #b0bec5; }
+
+        /* CO2 status badge */
+        .co2-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .co2-badge.ok       { background: #e8f5e9; color: #2e7d32; }
+        .co2-badge.high     { background: #fff8e1; color: #e65100; }
+        .co2-badge.critical { background: #fdecea; color: #c62828; }
+
+        /* Actuator row (window controls) */
+        .actuator-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 10px;
+            border-radius: 6px;
+            background: #f4f7f4;
+            margin-bottom: 6px;
+        }
+        .actuator-row .s-label { font-size: 13px; color: #555; flex: 1; }
 
         /* ============================================================
            Alerts panel
@@ -265,9 +303,6 @@ const CONFIG = {
     simInterval:     5000,       // ms between simulation ticks
 };
 
-// Build greenhouse ID list: [1, 2, ..., N]
-const GREENHOUSE_IDS = Array.from({ length: CONFIG.numGreenhouses }, (_, i) => i + 1);
-
 // ----------------------------------------------------------------
 // Alert thresholds
 // ----------------------------------------------------------------
@@ -278,73 +313,98 @@ const THRESHOLDS = {
 };
 
 // ----------------------------------------------------------------
-// State
+// State — greenhouses and plants discovered dynamically from MQTT
 // ----------------------------------------------------------------
-// state.data[gh_id][plant_id] = { temp, humidity, co2, soil, pump }
-// state.alerts[gh_id] = [ {key, msg, severity, time}, ... ]
 const state = {
     mode:             'offline',
-    activeGreenhouse: GREENHOUSE_IDS[0],
-    data:             {},
+    activeGreenhouse: null,
+    data:             {},   // data[gh][plant] = {temp,humidity,co2,soil,pump}
     alerts:           {},
+    windows:          {},   // windows[gh] = 'OPEN' | 'CLOSED'
 };
 
-GREENHOUSE_IDS.forEach(gh => {
-    state.data[gh]   = {};
-    state.alerts[gh] = [];
-    for (let p = 1; p <= CONFIG.numPlants; p++) {
-        state.data[gh][p] = { temp: null, humidity: null, co2: null, soil: null, pump: 'OFF' };
-    }
-});
+// ----------------------------------------------------------------
+// Dynamic DOM helpers — create greenhouse tab/panel and plant card
+// on first message, no hardcoded counts needed
+// ----------------------------------------------------------------
+function ensureGreenhouse(gh) {
+    if (document.getElementById(`tab-${gh}`)) return;
 
-// ----------------------------------------------------------------
-// Build static DOM skeleton
-// ----------------------------------------------------------------
-function buildDOM() {
     const tabBar = document.getElementById('gh-tabs');
     const content = document.getElementById('content');
+    const isFirst = state.activeGreenhouse === null;
+    if (isFirst) state.activeGreenhouse = gh;
+    if (!state.data[gh])      state.data[gh]      = {};
+    if (!state.alerts[gh])    state.alerts[gh]    = [];
+    if (!state.windows[gh])   state.windows[gh]   = 'CLOSED';
+    if (!state.enrichers)     state.enrichers     = {};
+    if (!state.enrichers[gh]) state.enrichers[gh] = 'OFF';
 
-    GREENHOUSE_IDS.forEach(gh => {
-        // Tab button
-        const tab = document.createElement('div');
-        tab.className = 'gh-tab' + (gh === state.activeGreenhouse ? ' active' : '');
-        tab.id        = `tab-${gh}`;
-        tab.onclick   = () => switchGreenhouse(gh);
-        tab.innerHTML = `Greenhouse ${gh} <span class="badge hidden" id="badge-${gh}">0</span>`;
-        tabBar.appendChild(tab);
+    const tab = document.createElement('div');
+    tab.className = 'gh-tab' + (isFirst ? ' active' : '');
+    tab.id        = `tab-${gh}`;
+    tab.onclick   = () => switchGreenhouse(gh);
+    tab.innerHTML = `Greenhouse ${gh} <span class="badge hidden" id="badge-${gh}">0</span>`;
+    tabBar.appendChild(tab);
 
-        // Panel
-        const panel = document.createElement('div');
-        panel.className = 'gh-panel' + (gh === state.activeGreenhouse ? ' active' : '');
-        panel.id        = `panel-${gh}`;
-        panel.innerHTML = `
-          <div class="gh-panel-header">
-            <span class="gh-title">Greenhouse ${gh}</span>
-            <span class="gh-meta" id="meta-${gh}">Waiting for data...</span>
-          </div>
-          <div class="alerts-panel" id="alerts-${gh}">
-            <h4>Active Alerts</h4>
-            <div id="alerts-list-${gh}"></div>
-          </div>
-          <div class="plants-grid" id="grid-${gh}"></div>`;
-        content.appendChild(panel);
+    const panel = document.createElement('div');
+    panel.className = 'gh-panel' + (isFirst ? ' active' : '');
+    panel.id        = `panel-${gh}`;
+    panel.innerHTML = `
+      <div class="gh-panel-header">
+        <span class="gh-title">Greenhouse ${gh}</span>
+        <div class="gh-window-ctrl" id="win-ctrl-${gh}">
+          <span class="s-label" style="font-size:13px;color:#c8e6c9">Window:</span>
+          <span class="win-badge closed" id="win-badge-${gh}">CLOSED</span>
+          <button class="btn btn-win-open"  style="padding:4px 10px;font-size:12px" onclick="setWindow(${gh},'OPEN')">Open</button>
+          <button class="btn btn-win-close" style="padding:4px 10px;font-size:12px" onclick="setWindow(${gh},'CLOSED')">Close</button>
+          &nbsp;&nbsp;
+          <span class="s-label" style="font-size:13px;color:#c8e6c9">CO2 Enricher:</span>
+          <span class="win-badge closed" id="enrich-badge-${gh}">OFF</span>
+        </div>
+        <span class="gh-meta" id="meta-${gh}">Waiting for data...</span>
+      </div>
+      <div class="alerts-panel" id="alerts-${gh}">
+        <h4>Active Alerts</h4>
+        <div id="alerts-list-${gh}"></div>
+      </div>
+      <div class="plants-grid" id="grid-${gh}"></div>`;
+    content.appendChild(panel);
+}
 
-        // Plant cards
-        const grid = panel.querySelector(`#grid-${gh}`);
+function ensurePlantCard(gh, plantId) {
+    ensureGreenhouse(gh);
+    if (document.getElementById(`card-${gh}-${plantId}`)) return;
+
+    if (!state.data[gh][plantId])
+        state.data[gh][plantId] = { temp: null, humidity: null, co2: null, soil: null, pump: 'OFF', window: 'CLOSED' };
+
+    const grid = document.getElementById(`grid-${gh}`);
+    const card = document.createElement('div');
+    card.className = 'plant-card';
+    card.id        = `card-${gh}-${plantId}`;
+    card.innerHTML = `
+      <div class="plant-card-hdr">
+        <h3>Plant ${plantId}</h3>
+        <span class="rpi-badge">RPi node ${plantId}</span>
+      </div>
+      <div class="plant-card-body" id="body-${gh}-${plantId}"></div>`;
+    grid.appendChild(card);
+    renderPlantCard(gh, plantId);
+}
+
+// ----------------------------------------------------------------
+// Build DOM skeleton — empty; greenhouses/plants added on first MQTT message
+// ----------------------------------------------------------------
+function buildDOM() {
+    // In simulation mode, pre-build CONFIG.numGreenhouses × CONFIG.numPlants
+    // so the UI is visible without needing a broker.
+    // In live mode ensurePlantCard() creates tabs/cards on demand.
+    for (let gh = 1; gh <= CONFIG.numGreenhouses; gh++) {
         for (let p = 1; p <= CONFIG.numPlants; p++) {
-            const card = document.createElement('div');
-            card.className = 'plant-card';
-            card.id        = `card-${gh}-${p}`;
-            card.innerHTML = `
-              <div class="plant-card-hdr">
-                <h3>Plant ${p}</h3>
-                <span class="rpi-badge">RPi node ${p}</span>
-              </div>
-              <div class="plant-card-body" id="body-${gh}-${p}"></div>`;
-            grid.appendChild(card);
-            renderPlantCard(gh, p);
+            ensurePlantCard(gh, p);
         }
-    });
+    }
 }
 
 // ----------------------------------------------------------------
@@ -375,18 +435,36 @@ function sensorRow(label, value, unit, metric) {
     </div>`;
 }
 
+function co2Badge(co2) {
+    if (co2 === null) return '';
+    if (co2 > 1500) return '<span class="co2-badge critical">ALARM</span>';
+    if (co2 > 1200) return '<span class="co2-badge high">HIGH</span>';
+    return '<span class="co2-badge ok">OK</span>';
+}
+
 function renderPlantCard(gh, plantId) {
     const body = document.getElementById(`body-${gh}-${plantId}`);
     if (!body) return;
     const p = state.data[gh][plantId];
+    const winState  = (p.window || 'CLOSED').toUpperCase();
+    const winCls    = winState === 'OPEN' ? 'open' : 'closed';
+    const pumpState = (p.pump  || 'OFF').toUpperCase();
     body.innerHTML =
         sensorRow('Temperature',   p.temp,     '°C',  'temp') +
         sensorRow('Humidity',      p.humidity, '%',   '') +
-        sensorRow('CO2',           p.co2,      'ppm', 'co2') +
+        `<div class="sensor-row${p.co2 > 1500 ? ' crit' : p.co2 > 1200 ? ' warn' : ''}">
+            <span class="s-label">CO2</span>
+            <span class="s-value${p.co2 > 1500 ? ' crit' : p.co2 > 1200 ? ' warn' : ''}">
+                ${p.co2 !== null ? Math.round(p.co2) : '--'}<span class="s-unit">ppm</span>
+            </span>
+            ${co2Badge(p.co2)}
+        </div>` +
         sensorRow('Soil Moisture', p.soil,     '%',   'soil') +
-        `<div class="pump-row">
-          <button class="btn btn-on"  onclick="setPump(${gh},${plantId},'ON')">Pump ON</button>
-          <button class="btn btn-off" onclick="setPump(${gh},${plantId},'OFF')">Pump OFF</button>
+        `<div class="actuator-row">
+          <span class="s-label">Pump</span>
+          <span class="win-badge ${pumpState==='ON' ? 'open' : 'closed'}" style="min-width:44px;text-align:center">${pumpState}</span>
+          <button class="btn btn-on"  style="opacity:${pumpState==='ON'?'1':'0.45'}" onclick="setPump(${gh},${plantId},'ON')">ON</button>
+          <button class="btn btn-off" style="opacity:${pumpState==='OFF'?'1':'0.45'}" onclick="setPump(${gh},${plantId},'OFF')">OFF</button>
         </div>`;
 }
 
@@ -441,17 +519,58 @@ function renderAlerts(gh) {
 // MQTT message handler
 // ----------------------------------------------------------------
 function handleMessage(topic, payload) {
-    // Expected: greenhouse/{gh_id}/plant/{plant_id}/{metric}
     const parts = topic.split('/');
-    if (parts.length !== 5 || parts[0] !== 'greenhouse' || parts[2] !== 'plant') return;
+    if (parts.length < 3 || parts[0] !== 'greenhouse') return;
+
+    // greenhouse/{gh}/window  (3 parts) — shared greenhouse window
+    if (parts.length === 3 && parts[2] === 'window') {
+        const gh = parseInt(parts[1], 10);
+        ensureGreenhouse(gh);
+        state.windows[gh] = payload.toUpperCase();
+        renderGreenhouseWindow(gh);
+        return;
+    }
+
+    // greenhouse/{gh}/co2_enricher  (3 parts)
+    if (parts.length === 3 && parts[2] === 'co2_enricher') {
+        const gh = parseInt(parts[1], 10);
+        ensureGreenhouse(gh);
+        if (!state.enrichers) state.enrichers = {};
+        state.enrichers[gh] = payload.toUpperCase();
+        const badge = document.getElementById(`enrich-badge-${gh}`);
+        if (badge) {
+            badge.textContent = state.enrichers[gh];
+            badge.className   = 'win-badge ' + (state.enrichers[gh] === 'ON' ? 'open' : 'closed');
+        }
+        return;
+    }
+
+    // greenhouse/{gh}/status/alarm  (4 parts)
+    if (parts.length === 4 && parts[2] === 'status' && parts[3] === 'alarm') {
+        const gh = parseInt(parts[1], 10);
+        ensureGreenhouse(gh);
+        if (!state.alerts[gh]) state.alerts[gh] = [];
+        const key = `${gh}-co2-alarm`;
+        if (payload.toUpperCase() === 'OK') {
+            state.alerts[gh] = state.alerts[gh].filter(a => a.key !== key);
+        } else {
+            const entry = { key, msg: `CO2 ALARM: ${payload}`,
+                            severity: 'critical', time: new Date().toLocaleTimeString() };
+            const idx = state.alerts[gh].findIndex(a => a.key === key);
+            if (idx >= 0) state.alerts[gh][idx] = entry; else state.alerts[gh].push(entry);
+        }
+        renderAlerts(gh);
+        return;
+    }
+
+    // greenhouse/{gh_id}/plant/{plant_id}/{metric}  (5 parts)
+    if (parts.length !== 5 || parts[2] !== 'plant') return;
 
     const gh      = parseInt(parts[1], 10);
     const plantId = parseInt(parts[3], 10);
     const metric  = parts[4];
 
-    if (!state.data[gh])             state.data[gh] = {};
-    if (!state.data[gh][plantId])    state.data[gh][plantId] = {};
-    if (!state.alerts[gh])           state.alerts[gh] = [];
+    ensurePlantCard(gh, plantId);   // creates tab + card if new greenhouse/plant
 
     const num = parseFloat(payload);
     state.data[gh][plantId][metric] = isNaN(num) ? payload : num;
@@ -466,7 +585,9 @@ function handleMessage(topic, payload) {
 
 function updateMeta(gh) {
     const meta = document.getElementById(`meta-${gh}`);
-    if (meta) meta.textContent = `${CONFIG.numPlants} plant nodes  |  updated ${new Date().toLocaleTimeString()}`;
+    if (!meta) return;
+    const plantCount = state.data[gh] ? Object.keys(state.data[gh]).length : 0;
+    meta.textContent = `${plantCount} plant nodes  |  updated ${new Date().toLocaleTimeString()}`;
 }
 
 // ----------------------------------------------------------------
@@ -475,7 +596,7 @@ function updateMeta(gh) {
 function setPump(gh, plantId, cmd) {
     const topic = `greenhouse/${gh}/plant/${plantId}/pump`;
     if (state.mode === 'live' && mqttClient) {
-        const msg = new Paho.MQTT.Message(cmd);
+        const msg = new Paho.Message(cmd);
         msg.destinationName = topic;
         msg.qos = 1;
         mqttClient.send(msg);
@@ -483,6 +604,27 @@ function setPump(gh, plantId, cmd) {
         state.data[gh][plantId].pump = cmd;
         renderPlantCard(gh, plantId);
     }
+}
+
+function setWindow(gh, cmd) {
+    const topic = `greenhouse/${gh}/window`;
+    if (state.mode === 'live' && mqttClient) {
+        const msg = new Paho.Message(cmd);
+        msg.destinationName = topic;
+        msg.qos = 1;
+        mqttClient.send(msg);
+    } else {
+        state.windows[gh] = cmd;
+        renderGreenhouseWindow(gh);
+    }
+}
+
+function renderGreenhouseWindow(gh) {
+    const badge = document.getElementById(`win-badge-${gh}`);
+    if (!badge) return;
+    const w = (state.windows[gh] || 'CLOSED').toUpperCase();
+    badge.textContent = w;
+    badge.className   = 'win-badge ' + (w === 'OPEN' ? 'open' : 'closed');
 }
 
 // ----------------------------------------------------------------
@@ -494,8 +636,8 @@ let simTimer   = null;
 function connectMQTT() {
     const clientId = 'dash-' + Math.random().toString(16).substr(2, 8);
     try {
-        mqttClient = new Paho.MQTT.Client(CONFIG.mqttHost, CONFIG.mqttPort, CONFIG.mqttPath, clientId);
-    } catch (e) { startSim(); return; }
+        mqttClient = new Paho.Client(CONFIG.mqttHost, CONFIG.mqttPort, CONFIG.mqttPath, clientId);
+    } catch (e) { console.error('Paho init failed:', e); startSim(); return; }
 
     mqttClient.onConnectionLost = () => {
         state.mode = 'offline';
@@ -510,40 +652,46 @@ function connectMQTT() {
             state.mode = 'live';
             stopSim();
             refreshHeader();
-            GREENHOUSE_IDS.forEach(gh => {
-                mqttClient.subscribe(`greenhouse/${gh}/plant/+/temp`);
-                mqttClient.subscribe(`greenhouse/${gh}/plant/+/humidity`);
-                mqttClient.subscribe(`greenhouse/${gh}/plant/+/co2`);
-                mqttClient.subscribe(`greenhouse/${gh}/plant/+/soil`);
-                mqttClient.subscribe(`greenhouse/${gh}/plant/+/pump`);
-            });
+            // Wildcard subscriptions — discovers any number of greenhouses/plants
+            mqttClient.subscribe('greenhouse/+/plant/+/temp');
+            mqttClient.subscribe('greenhouse/+/plant/+/humidity');
+            mqttClient.subscribe('greenhouse/+/plant/+/co2');
+            mqttClient.subscribe('greenhouse/+/plant/+/soil');
+            mqttClient.subscribe('greenhouse/+/plant/+/pump');
+            mqttClient.subscribe('greenhouse/+/window');
+            mqttClient.subscribe('greenhouse/+/co2_enricher');
+            mqttClient.subscribe('greenhouse/+/status/alarm');
         },
         onFailure: () => { state.mode = 'offline'; refreshHeader(); startSim(); },
     });
 }
 
 // ----------------------------------------------------------------
-// Simulation fallback
+// Simulation fallback — uses CONFIG.numGreenhouses × CONFIG.numPlants
 // ----------------------------------------------------------------
 const _sim = {};
-GREENHOUSE_IDS.forEach(gh => {
-    _sim[gh] = {};
-    for (let p = 1; p <= CONFIG.numPlants; p++) {
-        _sim[gh][p] = {
-            temp:     20 + Math.random() * 5,
-            humidity: 55 + Math.random() * 15,
-            co2:      700 + Math.random() * 200,
-            soil:     40  + Math.random() * 30,
-        };
+
+function _initSim() {
+    for (let gh = 1; gh <= CONFIG.numGreenhouses; gh++) {
+        _sim[gh] = {};
+        for (let p = 1; p <= CONFIG.numPlants; p++) {
+            _sim[gh][p] = {
+                temp:     20 + Math.random() * 5,
+                humidity: 55 + Math.random() * 15,
+                co2:      700 + Math.random() * 200,
+                soil:     40  + Math.random() * 30,
+            };
+        }
     }
-});
+}
 
 function simStep() {
     const rand  = (lo, hi) => lo + Math.random() * (hi - lo);
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-    GREENHOUSE_IDS.forEach(gh => {
+    for (let gh = 1; gh <= CONFIG.numGreenhouses; gh++) {
         for (let p = 1; p <= CONFIG.numPlants; p++) {
+            ensurePlantCard(gh, p);
             const s = _sim[gh][p];
             s.temp     = clamp(s.temp     + rand(-0.2, 0.25), 15, 40);
             s.humidity = clamp(s.humidity + rand(-0.5, 0.5),  30, 95);
@@ -555,13 +703,14 @@ function simStep() {
             renderPlantCard(gh, p);
             updateMeta(gh);
         }
-    });
+    }
     document.getElementById('last-update').textContent =
         '|  Last update: ' + new Date().toLocaleTimeString();
 }
 
 function startSim() {
     if (simTimer) return;
+    _initSim();
     state.mode = 'sim';
     refreshHeader();
     simStep();
