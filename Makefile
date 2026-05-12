@@ -1,5 +1,3 @@
-# Master Makefile for Greenhouse Project
-
 .PHONY: all install setup build run clean help test lint \
         mosquitto-start mosquitto-stop sensor-start rpi-node controller-start \
         firebase-sync dashboard

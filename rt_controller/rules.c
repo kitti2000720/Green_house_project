@@ -3,9 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Internal helpers                                                     */
-/* ------------------------------------------------------------------ */
 
 static void publish_retained(struct mosquitto *mosq,
                               const char       *topic,
@@ -32,9 +29,6 @@ static void publish_if_changed(struct mosquitto *mosq,
     *current = desired;
 }
 
-/* ------------------------------------------------------------------ */
-/* Rule evaluation                                                      */
-/* ------------------------------------------------------------------ */
 
 void rules_evaluate_snapshot(struct mosquitto         *mosq,
                               int                       greenhouse_id,

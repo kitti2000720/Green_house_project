@@ -19,7 +19,7 @@ static const char *TOPIC_PATTERNS[] = {
     (int)(sizeof(TOPIC_PATTERNS) / sizeof(TOPIC_PATTERNS[0]))
 
 /* ------------------------------------------------------------------ */
-/* MQTT callbacks                                                       */
+/* MQTT callbacks                                                      */
 /* ------------------------------------------------------------------ */
 
 static void on_connect(struct mosquitto *mosq, void *userdata, int rc)
@@ -113,8 +113,6 @@ int mqtt_handler_init(mqtt_context_t *ctx,
 
     pthread_mutex_init(&ctx->snapshot.lock, NULL);
 
-    /* All actuator states start as unknown so the first evaluation
-     * always publishes the initial command. */
     ctx->actuators.window       = ACT_UNKNOWN;
     ctx->actuators.co2_enricher = ACT_UNKNOWN;
     ctx->actuators.alarm        = ACT_UNKNOWN;

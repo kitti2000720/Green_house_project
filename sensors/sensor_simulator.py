@@ -2,7 +2,7 @@
 Greenhouse Sensor Simulator
 
 Simulates one or more independent greenhouses, each containing N plant nodes.
-Every node publishes its own temperature, humidity, CO2 and soil moisture
+Every node publishes its own temperature, humidity, CO2, and soil moisture
 readings under:
 
     greenhouse/{greenhouse_id}/plant/{plant_id}/{metric}
@@ -28,11 +28,13 @@ import signal
 import logging
 import argparse
 import threading
+
 from datetime import datetime
+
+import paho.mqtt.client as mqtt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import paho.mqtt.client as mqtt
 
 from config import (
     DEFAULT_MQTT_HOST,
@@ -52,11 +54,11 @@ class SensorSimulator:
 
     Data model
     ----------
-    self.nodes  :  {(greenhouse_id, plant_id): PlantNodeDynamics}
+    self.nodes: {(greenhouse_id, plant_id): PlantNodeDynamics}
 
     Topic structure published
     -------------------------
-    greenhouse/{gh}/plant/{plant}/temp
+    greenhouse/{gh}/plant/{plant}/tmp
     greenhouse/{gh}/plant/{plant}/humidity
     greenhouse/{gh}/plant/{plant}/co2
     greenhouse/{gh}/plant/{plant}/soil
@@ -102,10 +104,6 @@ class SensorSimulator:
         self._client.on_message    = self._on_message
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-    # ------------------------------------------------------------------
-    # Per-greenhouse initial conditions
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _initial_conditions(gh_id: int) -> dict:
         """Return distinct initial sensor values per greenhouse.
@@ -129,9 +127,6 @@ class SensorSimulator:
                 initial_soil=random.uniform(55.0, 75.0),
             )
 
-    # ------------------------------------------------------------------
-    # MQTT callbacks
-    # ------------------------------------------------------------------
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc != 0:
@@ -141,11 +136,9 @@ class SensorSimulator:
         logger.info("Connected to %s:%d", self.broker_host, self.broker_port)
 
         for gh_id in self.greenhouse_ids:
-            # Greenhouse-level actuators
             client.subscribe(f"greenhouse/{gh_id}/window")
             client.subscribe(f"greenhouse/{gh_id}/co2_enricher")
         for (gh_id, plant_id) in self.nodes:
-            # Per-plant: each plant has its own pump
             client.subscribe(f"greenhouse/{gh_id}/plant/{plant_id}/pump")
 
     def _on_disconnect(self, client, userdata, rc):
@@ -200,10 +193,6 @@ class SensorSimulator:
             node.set_pump(payload.upper() == "ON")
             logger.info("gh[%d]/plant[%d] pump -> %s", gh_id, plant_id, payload.upper())
 
-    # ------------------------------------------------------------------
-    # Publishing
-    # ------------------------------------------------------------------
-
     def _publish(self, topic: str, value: float) -> None:
         self._client.publish(topic, int(value), qos=1)
 
@@ -223,10 +212,6 @@ class SensorSimulator:
 
             parts = "  ".join(f"{m}={r[m]:.1f}" for m in METRIC_NAMES)
             logger.info("  gh[%d]/plant[%d]  %s", gh_id, plant_id, parts)
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
 
     def request_shutdown(self):
         """Signal the main loop to stop."""
@@ -265,10 +250,6 @@ class SensorSimulator:
             logger.info("Disconnected")
 
 
-# ------------------------------------------------------------------
-# Entry point
-# ------------------------------------------------------------------
-
 def _parse_greenhouse_ids(value: str) -> list:
     """Parse '1,2,3' into [1, 2, 3]."""
     try:
@@ -298,7 +279,6 @@ def main():
     parser.add_argument("--interval",         type=int, default=DEFAULT_PUBLISH_INTERVAL,
                         help="Publish interval in seconds")
 
-    # Mutually exclusive: either --num-greenhouses or --greenhouse-ids
     gh_group = parser.add_mutually_exclusive_group()
     gh_group.add_argument(
         "--num-greenhouses", type=int, default=DEFAULT_NUM_GREENHOUSES,

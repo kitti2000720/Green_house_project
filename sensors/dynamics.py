@@ -12,6 +12,7 @@ Call step() once per simulation tick to advance the state.
 
 import random
 
+
 METRIC_NAMES = ["temp", "humidity", "co2", "soil"]
 
 
@@ -21,16 +22,14 @@ class PlantNodeDynamics:
 
     This replaces the previous split between EnvironmentDynamics
     and PlantDynamics.  With the new architecture (1 RPi per plant)
-    every node is responsible for its own temperature, humidity, CO2
-    and soil moisture readings.
+    every node is responsible for its own temperature, humidity, CO2, and soil moisture readings.
 
     Typical actuator feedback
     -------------------------
-    pump_on = True   -> soil moisture rises
+    pump_on = True -> soil moisture rises
     window_open = True -> temperature, humidity and CO2 drop
     """
 
-    # Physical limits for each measurement
     TEMP_MIN     = 15.0
     TEMP_MAX     = 40.0
     HUMIDITY_MIN = 30.0
@@ -57,10 +56,8 @@ class PlantNodeDynamics:
         self.window_open  = False
         self.co2_enricher = False
 
-    # ------------------------------------------------------------------
-    # Actuator control
-    # ------------------------------------------------------------------
-
+    # region ===== Public methods =====
+    # region ----- Actuator control -----
     def set_pump(self, on: bool) -> None:
         self.pump_on = on
 
@@ -69,15 +66,13 @@ class PlantNodeDynamics:
 
     def set_co2_enricher(self, on: bool) -> None:
         self.co2_enricher = on
+    # endregion
 
-    # ------------------------------------------------------------------
-    # Simulation step
-    # ------------------------------------------------------------------
-
+    # region ----- Simulation -----
     def step(self) -> None:
         """Advance all sensor values by one simulation tick."""
 
-        # Temperature: rises naturally, drops when window is open
+        # Temperature: rises naturally, drops when the window is open
         if self.window_open:
             self.temp -= random.uniform(0.1, 0.3)
         else:
@@ -89,8 +84,8 @@ class PlantNodeDynamics:
         else:
             self.humidity += random.uniform(0.0, 0.5)
 
-        # CO2: rises naturally (respiration), drops when window opens.
-        # CO2 enricher injects CO2 to boost photosynthesis (only when window closed).
+        # CO2: rises naturally (respiration), drops when the window opens.
+        # CO2 enricher injects CO2 to boost photosynthesis (only when the window is closed).
         if self.window_open:
             self.co2 -= random.uniform(10.0, 30.0)
         elif self.co2_enricher:
@@ -104,16 +99,14 @@ class PlantNodeDynamics:
         else:
             self.soil -= random.uniform(0.3, 1.0)
 
-        # Clamp all values to physical limits
         self.temp     = max(self.TEMP_MIN,     min(self.TEMP_MAX,     self.temp))
         self.humidity = max(self.HUMIDITY_MIN, min(self.HUMIDITY_MAX, self.humidity))
         self.co2      = max(self.CO2_MIN,      min(self.CO2_MAX,      self.co2))
         self.soil     = max(self.SOIL_MIN,     min(self.SOIL_MAX,     self.soil))
+    # endregion
+    # endregion
 
-    # ------------------------------------------------------------------
-    # Convenience accessor
-    # ------------------------------------------------------------------
-
+    # region ===== Public properties =====
     @property
     def readings(self) -> dict:
         """Return all current sensor readings as a plain dict."""
@@ -123,3 +116,4 @@ class PlantNodeDynamics:
             "co2":      self.co2,
             "soil":     self.soil,
         }
+    # endregion

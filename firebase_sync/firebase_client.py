@@ -56,10 +56,6 @@ class FirebaseClient:
             logger.error("Init error: %s", exc)
             logger.info("Running in demo mode.")
 
-    # ------------------------------------------------------------------
-    # Write operations
-    # ------------------------------------------------------------------
-
     def write_latest(
         self,
         greenhouse_id: int,
@@ -103,8 +99,6 @@ class FirebaseClient:
             logger.info("Batch flushed (%d events)", len(events))
         except Exception as exc:
             logger.error("write_batch error: %s", exc)
-
-    # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
         """Delete the Firebase app and release resources."""

@@ -27,12 +27,9 @@
  */
 #define DEADLINE_WARN_NS    5000000L     /* 5 ms */
 
-/* ------------------------------------------------------------------ */
 
 static volatile int   g_running = 1;
 static mqtt_context_t g_mqtt;
-
-/* ------------------------------------------------------------------ */
 
 static void handle_signal(int sig)
 {
@@ -77,7 +74,6 @@ static void *rt_control_loop(void *arg)
             deadline.tv_sec  += 1;
         }
 
-        /* Sleep until the absolute deadline. */
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
 
         /* Measure how late we actually woke up (jitter). */
@@ -102,19 +98,15 @@ static void *rt_control_loop(void *arg)
                    cycle_count, jitter_ns / 1000L, jitter_max_ns / 1000L);
         }
 
-        /* Skip rule evaluation if the broker is not yet connected. */
         if (!ctx->connected) continue;
 
-        /* Take a local copy of the snapshot under the mutex,
-         * then immediately release the lock so the MQTT thread is not
-         * blocked while rules are evaluated. */
+        /* Take a snapshot under mutex, then release so MQTT thread isn't blocked. */
         sensor_snapshot_t snap;
         pthread_mutex_lock(&ctx->snapshot.lock);
         snap                  = ctx->snapshot;
         ctx->snapshot.updated = 0;
         pthread_mutex_unlock(&ctx->snapshot.lock);
 
-        /* Only evaluate rules when new sensor data has arrived. */
         if (!snap.updated) continue;
 
         /* Pass actuator state so rules only publish on state change. */

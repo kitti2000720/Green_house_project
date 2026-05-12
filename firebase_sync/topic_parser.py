@@ -8,14 +8,14 @@ the per-plant prefix:
 
     greenhouse/{id}/plant/{plant_id}/{metric}
 
-There are no shared env/ topics any more.  Every metric (temp,
+There are no shared env/ topics anymore.  Every metric (temp,
 humidity, co2, soil) belongs to exactly one plant node.
 
 To add a new alert rule : add an entry to ALERT_THRESHOLDS.
 To add a new topic category: extend parse_topic().
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 # ------------------------------------------------------------------
@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 # Value = threshold dict with optional "min" and/or "max" keys.
 # ------------------------------------------------------------------
 
-ALERT_THRESHOLDS: Dict[str, Dict[str, Any]] = {
+ALERT_THRESHOLDS: dict[str, dict[str, Any]] = {
     "temp": {
         "max":        30,
         "unit":       "C",
@@ -51,14 +51,14 @@ ALERT_THRESHOLDS: Dict[str, Dict[str, Any]] = {
 # Topic parsing
 # ------------------------------------------------------------------
 
-def parse_topic(topic: str, value: str, greenhouse_id: int) -> Optional[Dict[str, Any]]:
+def parse_topic(topic: str, value: str, greenhouse_id: int) -> dict[str, Any] | None:
     """
     Parse an MQTT topic into a structured record.
 
     Returns None when the topic does not belong to this greenhouse
-    or has an unrecognised structure.
+    or has an unrecognized structure.
 
-    Recognised patterns
+    Recognized patterns
     -------------------
     greenhouse/{id}/plant/{plant_id}/{metric}
         -> {"category": "plant", "plant_id": int, "metric": str, "value": str}
@@ -104,7 +104,7 @@ def parse_topic(topic: str, value: str, greenhouse_id: int) -> Optional[Dict[str
     return None
 
 
-def check_alerts(parsed: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def check_alerts(parsed: dict[str, Any] | None) -> list[dict[str, Any]]:
     """
     Return a list of alert dicts for a parsed topic record.
 

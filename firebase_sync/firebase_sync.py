@@ -41,15 +41,18 @@ class FirebaseSyncService:
     Responsibilities
     ----------------
     - Subscribe to all sensor and actuator topics.
-    - On each message: write latest value + append event to Firebase.
+    - On each message: write the latest value and append event to Firebase.
     - Buffer events and flush as a batch every EVENT_BUFFER_SIZE messages.
     - Log alerts when thresholds are breached.
+
+    Attributes:
+        SUBSCRIPTIONS: list
+            Topic patterns to subscribe to per greenhouse.
+            Use ``{id}`` as a placeholder for the greenhouse ID.
+            Add new patterns here to capture additional topics without changing
+            any other part of the code.
     """
 
-    # Topic patterns to subscribe to per greenhouse.
-    # Use {id} as a placeholder for the greenhouse ID.
-    # Add new patterns here to capture additional topics without changing
-    # any other part of the code.
     SUBSCRIPTIONS = [
         "greenhouse/{id}/plant/+/soil",
         "greenhouse/{id}/plant/+/temp",
@@ -83,10 +86,8 @@ class FirebaseSyncService:
         self._client.on_message    = self._on_message
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-    # ------------------------------------------------------------------
-    # MQTT callbacks
-    # ------------------------------------------------------------------
-
+    # region ===== Protected methods  =====
+    # region MQTT callbacks
     def _on_connect(self, client, userdata, flags, rc):
         if rc != 0:
             logger.error("MQTT connection failed: rc=%d", rc)
@@ -130,20 +131,16 @@ class FirebaseSyncService:
         parsed = parse_topic(topic, payload, gh_id)
         for alert in check_alerts(parsed):
             logger.warning("ALERT [%s]: %s", alert['severity'].upper(), alert['message'])
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # endregion
 
     def _flush_buffer(self, greenhouse_id: int = None) -> None:
         gh_id = greenhouse_id if greenhouse_id is not None else self.greenhouse_ids[0]
         self._firebase.write_batch(gh_id, self._event_buffer)
         self._event_buffer.clear()
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
+    # endregion
 
+    # region ===== Public methods =====
     def request_shutdown(self):
         """Signal the main loop to stop."""
         self._shutdown.set()
@@ -173,10 +170,8 @@ class FirebaseSyncService:
             self._firebase.cleanup()
             logger.info("Disconnected")
 
+    # endregion
 
-# ------------------------------------------------------------------
-# Entry point
-# ------------------------------------------------------------------
 
 def main():
     logging.basicConfig(

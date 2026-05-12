@@ -4,13 +4,13 @@ Raspberry Pi Plant Node - Sensor Reader
 One instance of this script runs on each Raspberry Pi.
 Each RPi belongs to exactly one greenhouse and one plant:
 
-    --greenhouse-id <id>   --plant-id <id>
+    --greenhouse-id <id> --plant-id <id>
 
 Sensors read
 ------------
-- DHT22    : temperature + humidity  (GPIO)
-- ADS1115  : soil moisture           (I2C ADC, channel 0)
-- MH-Z19B  : CO2 concentration       (UART)
+- DHT22: temperature and humidity (GPIO)
+- ADS1115: soil moisture (I2C ADC, channel 0)
+- MH-Z19B: CO2 concentration (UART)
 
 Error handling
 --------------
@@ -30,19 +30,15 @@ import logging
 import argparse
 import threading
 
+import paho.mqtt.client as mqtt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 
 from dynamics import PlantNodeDynamics
 
 try:
-    import paho.mqtt.client as mqtt
-except ImportError:
-    print("ERROR: paho-mqtt not installed. Run: pip install paho-mqtt")
-    sys.exit(1)
-
-try:
-    from sense_hat import SenseHat as _SenseHat
+    from sense_hat import SenseHat as SenseHat
     _SENSEHAT_AVAILABLE = True
 except ImportError:
     _SENSEHAT_AVAILABLE = False
@@ -107,14 +103,10 @@ logger = logging.getLogger("rpi_sensor_reader")
 MAX_CONSECUTIVE_ERRORS = 5
 
 
-# ------------------------------------------------------------------
-# Sensor validation helper
-# ------------------------------------------------------------------
-
 def _validate(value: float, valid_range: tuple, name: str) -> float | None:
     """
     Return value if it is within valid_range, otherwise log and return None.
-    valid_range is (min, max) inclusive.
+    Valid_range is (min, max) inclusive.
     """
     lo, hi = valid_range
     if lo <= value <= hi:
@@ -122,10 +114,6 @@ def _validate(value: float, valid_range: tuple, name: str) -> float | None:
     logger.warning("%s=%.2f is outside valid range [%.1f, %.1f] - discarding", name, value, lo, hi)
     return None
 
-
-# ------------------------------------------------------------------
-# Sensor driver classes
-# ------------------------------------------------------------------
 
 class SenseHatReader:
     """Reads temperature and humidity from a Raspberry Pi Sense HAT."""
@@ -135,7 +123,7 @@ class SenseHatReader:
         self._sense     = None
         if self._available:
             try:
-                self._sense = _SenseHat()
+                self._sense = SenseHat()
                 self._sense.clear()
                 logger.info("[SenseHAT] Initialised")
             except Exception as exc:
@@ -270,7 +258,7 @@ class CO2SensorReader:
         """Return CO2 in ppm, or None on failure. Disables itself after too many errors."""
         if not self._available:
             return None
-        import os, io
+        import os
         try:
             # Redirect stderr to suppress mh_z19's internal traceback output
             devnull = open(os.devnull, 'w')
@@ -299,10 +287,6 @@ class CO2SensorReader:
                 self._available = False   # stop retrying
         return None
 
-
-# ------------------------------------------------------------------
-# Main node class
-# ------------------------------------------------------------------
 
 class RaspberryPiPlantNode:
     """
@@ -357,8 +341,6 @@ class RaspberryPiPlantNode:
         self._client.on_message    = self._on_message
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-    # ------------------------------------------------------------------
-
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self._connected.set()
@@ -386,8 +368,6 @@ class RaspberryPiPlantNode:
         elif actuator == "co2_enricher":
             self._dynamics.set_co2_enricher(payload.upper() == "ON")
 
-    # ------------------------------------------------------------------
-
     def _publish(self, metric: str, value: float) -> None:
         topic = f"{self._topic_base}/{metric}"
         self._client.publish(topic, int(value), qos=1)
@@ -413,8 +393,6 @@ class RaspberryPiPlantNode:
 
         co2 = self._co2.read()
         self._publish("co2",  co2  if co2  is not None else sim["co2"])
-
-    # ------------------------------------------------------------------
 
     def request_shutdown(self):
         """Signal the main loop to stop."""
@@ -451,10 +429,6 @@ class RaspberryPiPlantNode:
                     pass
             logger.info("Disconnected")
 
-
-# ------------------------------------------------------------------
-# Entry point
-# ------------------------------------------------------------------
 
 def main():
     logging.basicConfig(
