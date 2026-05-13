@@ -1,8 +1,3 @@
-"""
-Firebase sync module default configuration.
-Override values by passing arguments to the entry-point script.
-"""
-
 MQTT_HOST         = "localhost"
 MQTT_PORT         = 1883
 GREENHOUSE_ID     = 1
