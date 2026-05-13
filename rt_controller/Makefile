@@ -10,7 +10,6 @@ SOURCES = greenhouse_controller.c \
 
 OBJECTS = $(SOURCES:.c=.o)
 
-# ------------------------------------------------------------------ #
 
 all: $(TARGET)
 

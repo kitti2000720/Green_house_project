@@ -1,6 +1,4 @@
 #!/bin/bash
-# Run from WSL project root: bash start.sh
-
 PROJECT_DIR="/mnt/c/Users/molar/Green_house_project"
 VENV="$PROJECT_DIR/venv/bin/activate"
 RT_DIR="$PROJECT_DIR/rt_controller"

@@ -1,9 +1,11 @@
-import os
-import sys
-import signal
-import logging
 import argparse
+import logging
+import os
+import random
+import signal
+import sys
 import threading
+
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,58 +25,56 @@ logger = logging.getLogger("sensor_simulator")
 
 
 class SensorSimulator:
+    """Simulates multiple greenhouse plant nodes by running independent environmental dynamics and publishing sensor readings via MQTT."""
+
     def __init__(
         self,
-        broker_host: str      = DEFAULT_MQTT_HOST,
-        broker_port: int      = DEFAULT_MQTT_PORT,
-        greenhouse_ids: list  = None,
-        num_plants: int       = DEFAULT_NUM_PLANTS,
-        plant_ids: list       = None,
+        broker_host: str = DEFAULT_MQTT_HOST,
+        broker_port: int = DEFAULT_MQTT_PORT,
+        greenhouse_ids: list[int] | None = None,
+        num_plants: int = DEFAULT_NUM_PLANTS,
+        plant_ids: list[int] | None = None,
     ):
-        self.broker_host    = broker_host
-        self.broker_port    = broker_port
+        self.broker_host = broker_host
+        self.broker_port = broker_port
         self.greenhouse_ids = greenhouse_ids or [1]
-        self.num_plants     = num_plants
+        self.num_plants = num_plants
 
         effective_plant_ids = plant_ids if plant_ids else list(range(1, num_plants + 1))
 
         # Keyed by (greenhouse_id, plant_id) so every node is independent.
-        # Each greenhouse gets a distinct environment so that rules fire
-        # at different times and the demo shows real variation.
-        self.nodes: dict = {
+        self.nodes: dict[tuple[int, int], PlantNodeDynamics] = {
             (gh_id, plant_id): PlantNodeDynamics(
                 **self._initial_conditions(gh_id)
             )
-            for gh_id    in self.greenhouse_ids
+            for gh_id in self.greenhouse_ids
             for plant_id in effective_plant_ids
         }
 
         self._connected = threading.Event()
-        self._shutdown  = threading.Event()
+        self._shutdown = threading.Event()
 
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
-        self._client.on_connect    = self._on_connect
+        self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
-        self._client.on_message    = self._on_message
+        self._client.on_message = self._on_message
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
     @staticmethod
-    def _initial_conditions(gh_id: int) -> dict:
-        import random
+    def _initial_conditions(gh_id: int) -> dict[str, float]:
         if gh_id % 2 == 0:
-            return dict(
-                initial_temp=random.uniform(30.0, 36.0),
-                initial_humidity=random.uniform(30.0, 45.0),
-                initial_co2=random.uniform(1200.0, 1600.0),
-                initial_soil=random.uniform(10.0, 25.0),
-            )
-        else:
-            return dict(
-                initial_temp=random.uniform(18.0, 23.0),
-                initial_humidity=random.uniform(65.0, 80.0),
-                initial_co2=random.uniform(600.0, 850.0),
-                initial_soil=random.uniform(55.0, 75.0),
-            )
+            return {
+                "initial_temp": random.uniform(30.0, 36.0),
+                "initial_humidity": random.uniform(30.0, 45.0),
+                "initial_co2": random.uniform(1200.0, 1600.0),
+                "initial_soil": random.uniform(10.0, 25.0),
+            }
+        return {
+            "initial_temp": random.uniform(18.0, 23.0),
+            "initial_humidity": random.uniform(65.0, 80.0),
+            "initial_co2": random.uniform(600.0, 850.0),
+            "initial_soil": random.uniform(55.0, 75.0),
+        }
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc != 0:
@@ -84,11 +84,9 @@ class SensorSimulator:
         logger.info("Connected to %s:%d", self.broker_host, self.broker_port)
 
         for gh_id in self.greenhouse_ids:
-            # Greenhouse-level actuators
             client.subscribe(f"greenhouse/{gh_id}/window")
             client.subscribe(f"greenhouse/{gh_id}/co2_enricher")
         for (gh_id, plant_id) in self.nodes:
-            # Per-plant: each plant has its own pump
             client.subscribe(f"greenhouse/{gh_id}/plant/{plant_id}/pump")
 
     def _on_disconnect(self, client, userdata, rc):
@@ -132,7 +130,7 @@ class SensorSimulator:
         if node is None:
             return
 
-        payload  = msg.payload.decode()
+        payload = msg.payload.decode()
         actuator = parts[4]
 
         if actuator == "pump":
@@ -150,7 +148,7 @@ class SensorSimulator:
         logger.info("[%s]", ts)
 
         for (gh_id, plant_id), node in sorted(self.nodes.items()):
-            r    = node.readings
+            r = node.readings
             base = f"greenhouse/{gh_id}/plant/{plant_id}"
 
             for metric in METRIC_NAMES:
@@ -159,7 +157,7 @@ class SensorSimulator:
             parts = "  ".join(f"{m}={r[m]:.1f}" for m in METRIC_NAMES)
             logger.info("  gh[%d]/plant[%d]  %s", gh_id, plant_id, parts)
 
-    def request_shutdown(self):
+    def request_shutdown(self) -> None:
         self._shutdown.set()
 
     def run(self, interval: int = DEFAULT_PUBLISH_INTERVAL) -> None:
@@ -193,12 +191,7 @@ class SensorSimulator:
             logger.info("Disconnected")
 
 
-# ------------------------------------------------------------------
-# Entry point
-# ------------------------------------------------------------------
-
 def _parse_greenhouse_ids(value: str) -> list:
-    """Parse '1,2,3' into [1, 2, 3]."""
     try:
         return [int(x.strip()) for x in value.split(",") if x.strip()]
     except ValueError:
@@ -207,7 +200,8 @@ def _parse_greenhouse_ids(value: str) -> list:
         )
 
 
-def main():
+def main() -> None:
+    """Main entry point for the sensor simulator."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
@@ -217,13 +211,13 @@ def main():
         description="Greenhouse Sensor Simulator - simulates independent RPi plant nodes",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--host",             default=DEFAULT_MQTT_HOST,
+    parser.add_argument("--host", default=DEFAULT_MQTT_HOST,
                         help="MQTT broker host")
-    parser.add_argument("--port",             type=int, default=DEFAULT_MQTT_PORT,
+    parser.add_argument("--port", type=int, default=DEFAULT_MQTT_PORT,
                         help="MQTT broker port")
-    parser.add_argument("--plants",           type=int, default=DEFAULT_NUM_PLANTS,
+    parser.add_argument("--plants", type=int, default=DEFAULT_NUM_PLANTS,
                         help="Number of plant nodes per greenhouse")
-    parser.add_argument("--interval",         type=int, default=DEFAULT_PUBLISH_INTERVAL,
+    parser.add_argument("--interval", type=int, default=DEFAULT_PUBLISH_INTERVAL,
                         help="Publish interval in seconds")
 
     # Mutually exclusive: either --num-greenhouses or --greenhouse-ids
@@ -260,12 +254,11 @@ def main():
         plant_ids=args.plant_ids,
     )
 
-    # Graceful shutdown on SIGINT / SIGTERM
     def _signal_handler(sig, frame):
         logger.info("Received signal %d, shutting down...", sig)
         simulator.request_shutdown()
 
-    signal.signal(signal.SIGINT,  _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     simulator.run(interval=args.interval)
