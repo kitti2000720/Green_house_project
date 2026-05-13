@@ -1,28 +1,3 @@
-"""
-Raspberry Pi Plant Node - Sensor Reader
-
-One instance of this script runs on each Raspberry Pi.
-Each RPi belongs to exactly one greenhouse and one plant:
-
-    --greenhouse-id <id>   --plant-id <id>
-
-Sensors read
-------------
-- DHT22    : temperature + humidity  (GPIO)
-- ADS1115  : soil moisture           (I2C ADC, channel 0)
-- MH-Z19B  : CO2 concentration       (UART)
-
-Error handling
---------------
-Every sensor read is validated against physical bounds defined in config.py.
-A reading that falls outside the valid range is discarded and logged.
-If a sensor fails MAX_CONSECUTIVE_ERRORS times in a row, a warning is
-emitted to alert the operator.
-
-Install hardware libraries on the Raspberry Pi:
-    pip install Adafruit-DHT adafruit-circuitpython-ads1x15 RPi.GPIO mh-z19
-"""
-
 import os
 import sys
 import signal
@@ -112,10 +87,6 @@ MAX_CONSECUTIVE_ERRORS = 5
 # ------------------------------------------------------------------
 
 def _validate(value: float, valid_range: tuple, name: str) -> float | None:
-    """
-    Return value if it is within valid_range, otherwise log and return None.
-    valid_range is (min, max) inclusive.
-    """
     lo, hi = valid_range
     if lo <= value <= hi:
         return value
@@ -128,15 +99,12 @@ def _validate(value: float, valid_range: tuple, name: str) -> float | None:
 # ------------------------------------------------------------------
 
 class SenseHatReader:
-    """Reads temperature and humidity from a Raspberry Pi Sense HAT."""
-
     def __init__(self):
         self._available = _SENSEHAT_AVAILABLE
         self._sense     = None
         if self._available:
             try:
                 self._sense = _SenseHat()
-                self._sense.clear()
                 logger.info("[SenseHAT] Initialised")
             except Exception as exc:
                 logger.warning("[SenseHAT] Init failed: %s", exc)
@@ -145,7 +113,6 @@ class SenseHatReader:
             logger.warning("[SenseHAT] sense-hat not available. Install: pip install sense-hat")
 
     def read(self) -> dict:
-        """Return {temp, humidity} from Sense HAT sensors, or {} on failure."""
         if not self._available:
             return {}
         try:
@@ -163,8 +130,6 @@ class SenseHatReader:
 
 
 class DHT22Reader:
-    """Reads temperature and humidity from a DHT22 sensor via GPIO."""
-
     def __init__(self, gpio_pin: int):
         self._pin          = gpio_pin
         self._available    = _DHT_AVAILABLE
@@ -184,7 +149,6 @@ class DHT22Reader:
             logger.warning("[DHT22] DHT library not available.")
 
     def read(self) -> dict:
-        """Return validated {temp, humidity} or {} on failure."""
         if not self._available:
             return {}
         try:
@@ -216,8 +180,6 @@ class DHT22Reader:
 
 
 class SoilMoistureReader:
-    """Reads soil moisture from a capacitive sensor via ADS1115 ADC."""
-
     _CHANNEL_PINS = [0, 1, 2, 3]
 
     def __init__(self, i2c_address: int, channel: int):
@@ -235,7 +197,6 @@ class SoilMoistureReader:
             logger.error("[ADS1115] Init error: %s", exc)
 
     def read(self) -> float | None:
-        """Return moisture percentage (0-100) or None on failure."""
         if self._ads is None or self._channel not in range(4):
             return None
         try:
@@ -255,8 +216,6 @@ class SoilMoistureReader:
 
 
 class CO2SensorReader:
-    """Reads CO2 concentration from an MH-Z19B sensor via UART."""
-
     def __init__(self, serial_port: str):
         self._port        = serial_port
         self._available   = _MHZ19_AVAILABLE
@@ -267,7 +226,6 @@ class CO2SensorReader:
             logger.warning("[MH-Z19] mh_z19 not available. Install: pip install mh-z19")
 
     def read(self) -> int | None:
-        """Return CO2 in ppm, or None on failure. Disables itself after too many errors."""
         if not self._available:
             return None
         import os, io
@@ -305,24 +263,6 @@ class CO2SensorReader:
 # ------------------------------------------------------------------
 
 class RaspberryPiPlantNode:
-    """
-    Reads all sensors on a single Raspberry Pi and publishes to MQTT.
-
-    Each instance represents one plant in one greenhouse.
-
-    Topic structure
-    ---------------
-    Published:
-        greenhouse/{greenhouse_id}/plant/{plant_id}/temp
-        greenhouse/{greenhouse_id}/plant/{plant_id}/humidity
-        greenhouse/{greenhouse_id}/plant/{plant_id}/co2
-        greenhouse/{greenhouse_id}/plant/{plant_id}/soil
-
-    Subscribed (actuator commands):
-        greenhouse/{greenhouse_id}/plant/{plant_id}/pump    -> ON / OFF
-        greenhouse/{greenhouse_id}/plant/{plant_id}/window  -> OPEN / CLOSED
-    """
-
     def __init__(
         self,
         broker_host: str   = DEFAULT_MQTT_HOST,
@@ -342,11 +282,11 @@ class RaspberryPiPlantNode:
         self._topic_base = f"greenhouse/{greenhouse_id}/plant/{plant_id}"
 
         self._sense = SenseHatReader()
-        self._dht   = DHT22Reader(dht_pin)    # fallback if no Sense HAT
+        self._dht   = DHT22Reader(dht_pin)
         self._soil  = SoilMoistureReader(ads_address, ads_channel)
         self._co2  = CO2SensorReader(co2_port)
 
-        self._dynamics = PlantNodeDynamics()
+        self._dynamics  = PlantNodeDynamics()
 
         self._connected = threading.Event()
         self._shutdown  = threading.Event()
@@ -398,9 +338,7 @@ class RaspberryPiPlantNode:
             return
 
         self._dynamics.step()
-        sim = self._dynamics.readings
-
-        # Sense HAT is primary; DHT22 is fallback; simulation is last resort
+        sim   = self._dynamics.readings
         sense = self._sense.read()
         dht   = self._dht.read() if not sense else {}
         temp  = sense.get("temp")     or dht.get("temp")
@@ -417,7 +355,6 @@ class RaspberryPiPlantNode:
     # ------------------------------------------------------------------
 
     def request_shutdown(self):
-        """Signal the main loop to stop."""
         self._shutdown.set()
 
     def run(self, interval: int = DEFAULT_PUBLISH_INTERVAL) -> None:
@@ -433,7 +370,6 @@ class RaspberryPiPlantNode:
                 "Running  greenhouse=%d  plant=%d  interval=%ds",
                 self.greenhouse_id, self.plant_id, interval,
             )
-            logger.info("Press Ctrl+C to stop.")
 
             while not self._shutdown.is_set():
                 self.publish_readings()

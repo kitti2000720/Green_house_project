@@ -1,27 +1,3 @@
-"""
-Greenhouse Sensor Simulator
-
-Simulates one or more independent greenhouses, each containing N plant nodes.
-Every node publishes its own temperature, humidity, CO2 and soil moisture
-readings under:
-
-    greenhouse/{greenhouse_id}/plant/{plant_id}/{metric}
-
-This mirrors the production deployment where one physical Raspberry Pi
-is attached to exactly one plant in exactly one greenhouse.
-
-Usage examples
---------------
-# One greenhouse, three plants (default)
-python3 sensor_simulator.py
-
-# Two greenhouses, four plants each
-python3 sensor_simulator.py --num-greenhouses 2 --plants 4
-
-# Specific greenhouse IDs
-python3 sensor_simulator.py --greenhouse-ids 1,3,5 --plants 2
-"""
-
 import os
 import sys
 import signal
@@ -47,26 +23,6 @@ logger = logging.getLogger("sensor_simulator")
 
 
 class SensorSimulator:
-    """
-    Simulates multiple greenhouses, each with multiple Raspberry Pi plant nodes.
-
-    Data model
-    ----------
-    self.nodes  :  {(greenhouse_id, plant_id): PlantNodeDynamics}
-
-    Topic structure published
-    -------------------------
-    greenhouse/{gh}/plant/{plant}/temp
-    greenhouse/{gh}/plant/{plant}/humidity
-    greenhouse/{gh}/plant/{plant}/co2
-    greenhouse/{gh}/plant/{plant}/soil
-
-    Actuator commands consumed
-    --------------------------
-    greenhouse/{gh}/plant/{plant}/pump    -> ON / OFF
-    greenhouse/{gh}/plant/{plant}/window  -> OPEN / CLOSED
-    """
-
     def __init__(
         self,
         broker_host: str      = DEFAULT_MQTT_HOST,
@@ -102,17 +58,8 @@ class SensorSimulator:
         self._client.on_message    = self._on_message
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-    # ------------------------------------------------------------------
-    # Per-greenhouse initial conditions
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _initial_conditions(gh_id: int) -> dict:
-        """Return distinct initial sensor values per greenhouse.
-
-        Odd IDs  → cool, moist, low CO2 (stable baseline)
-        Even IDs → hot, dry, elevated CO2 (rules fire quickly for demo)
-        """
         import random
         if gh_id % 2 == 0:
             return dict(
@@ -128,10 +75,6 @@ class SensorSimulator:
                 initial_co2=random.uniform(600.0, 850.0),
                 initial_soil=random.uniform(55.0, 75.0),
             )
-
-    # ------------------------------------------------------------------
-    # MQTT callbacks
-    # ------------------------------------------------------------------
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc != 0:
@@ -154,7 +97,6 @@ class SensorSimulator:
             logger.warning("Unexpected disconnect (rc=%d). Auto-reconnect enabled.", rc)
 
     def _on_message(self, client, userdata, msg):
-        """Handle actuator commands from the RT controller."""
         parts = msg.topic.split("/")
         if len(parts) < 3 or parts[0] != "greenhouse":
             return
@@ -163,7 +105,6 @@ class SensorSimulator:
         except ValueError:
             return
 
-        # greenhouse/{gh_id}/window  — shared window for all plants
         if len(parts) == 3 and parts[2] == "window":
             state = msg.payload.decode().upper() == "OPEN"
             for (g, _), node in self.nodes.items():
@@ -172,7 +113,6 @@ class SensorSimulator:
             logger.info("gh[%d] window -> %s", gh_id, msg.payload.decode().upper())
             return
 
-        # greenhouse/{gh_id}/co2_enricher — CO2 injection for all plants
         if len(parts) == 3 and parts[2] == "co2_enricher":
             enriching = msg.payload.decode().upper() == "ON"
             for (g, _), node in self.nodes.items():
@@ -181,7 +121,6 @@ class SensorSimulator:
             logger.info("gh[%d] co2_enricher -> %s", gh_id, msg.payload.decode().upper())
             return
 
-        # greenhouse/{gh_id}/plant/{plant_id}/{actuator}
         if len(parts) != 5 or parts[2] != "plant":
             return
         try:
@@ -199,10 +138,6 @@ class SensorSimulator:
         if actuator == "pump":
             node.set_pump(payload.upper() == "ON")
             logger.info("gh[%d]/plant[%d] pump -> %s", gh_id, plant_id, payload.upper())
-
-    # ------------------------------------------------------------------
-    # Publishing
-    # ------------------------------------------------------------------
 
     def _publish(self, topic: str, value: float) -> None:
         self._client.publish(topic, int(value), qos=1)
@@ -224,12 +159,7 @@ class SensorSimulator:
             parts = "  ".join(f"{m}={r[m]:.1f}" for m in METRIC_NAMES)
             logger.info("  gh[%d]/plant[%d]  %s", gh_id, plant_id, parts)
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
-
     def request_shutdown(self):
-        """Signal the main loop to stop."""
         self._shutdown.set()
 
     def run(self, interval: int = DEFAULT_PUBLISH_INTERVAL) -> None:
@@ -247,8 +177,6 @@ class SensorSimulator:
                 "total_nodes=%d  interval=%ds",
                 self.greenhouse_ids, self.num_plants, total_nodes, interval,
             )
-            logger.info("Press Ctrl+C to stop.")
-
             while not self._shutdown.is_set():
                 self._shutdown.wait(timeout=interval)
                 if self._shutdown.is_set():

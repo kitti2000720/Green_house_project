@@ -1,16 +1,3 @@
-"""
-Greenhouse Firebase Sync Service
-
-Subscribes to all MQTT topics for a greenhouse and forwards
-every event to Firebase Realtime Database.
-
-Demo mode
----------
-If no --credentials are provided (or firebase-admin is not installed),
-the service runs in demo mode: MQTT events are printed to stdout but
-nothing is written to Firebase.
-"""
-
 import os
 import sys
 import signal
@@ -35,28 +22,14 @@ logger = logging.getLogger("firebase_sync")
 
 
 class FirebaseSyncService:
-    """
-    Bridges MQTT events to Firebase Realtime Database.
-
-    Responsibilities
-    ----------------
-    - Subscribe to all sensor and actuator topics.
-    - On each message: write latest value + append event to Firebase.
-    - Buffer events and flush as a batch every EVENT_BUFFER_SIZE messages.
-    - Log alerts when thresholds are breached.
-    """
-
-    # Topic patterns to subscribe to per greenhouse.
-    # Use {id} as a placeholder for the greenhouse ID.
-    # Add new patterns here to capture additional topics without changing
-    # any other part of the code.
     SUBSCRIPTIONS = [
         "greenhouse/{id}/plant/+/soil",
         "greenhouse/{id}/plant/+/temp",
         "greenhouse/{id}/plant/+/humidity",
         "greenhouse/{id}/plant/+/co2",
         "greenhouse/{id}/plant/+/pump",
-        "greenhouse/{id}/actuators/+",
+        "greenhouse/{id}/window",
+        "greenhouse/{id}/co2_enricher",
         "greenhouse/{id}/status/+",
     ]
 

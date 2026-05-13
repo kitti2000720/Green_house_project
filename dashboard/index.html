@@ -475,22 +475,26 @@ function addAlert(gh, plantId, metric, value) {
     const rule = THRESHOLDS[metric];
     if (!rule || value === null) return;
 
+    const key    = `${gh}-${plantId}-${metric}`;
+    const alerts = state.alerts[gh];
+
     let msg = null;
     if (rule.max !== undefined && value > rule.max)
-        msg = `Plant ${plantId}: ${metric}=${Math.round(value)}${rule.unit} exceeds limit ${rule.max}${rule.unit}`;
+        msg = `Plant ${plantId}: ${metric}=${Math.round(value)}${rule.unit} exceeds ${rule.max}${rule.unit}`;
     if (rule.min !== undefined && value < rule.min)
-        msg = `Plant ${plantId}: ${metric}=${Math.round(value)}${rule.unit} below minimum ${rule.min}${rule.unit}`;
-    if (!msg) return;
+        msg = `Plant ${plantId}: ${metric}=${Math.round(value)}${rule.unit} below ${rule.min}${rule.unit}`;
 
-    const key     = `${gh}-${plantId}-${metric}`;
-    const alerts  = state.alerts[gh];
-    const idx     = alerts.findIndex(a => a.key === key);
-    const entry   = { key, msg, severity: rule.severity, time: new Date().toLocaleTimeString() };
+    if (!msg) {
+        const idx = alerts.findIndex(a => a.key === key);
+        if (idx >= 0) { alerts.splice(idx, 1); renderAlerts(gh); }
+        return;
+    }
 
+    const entry = { key, msg, severity: rule.severity, time: new Date().toLocaleTimeString() };
+    const idx   = alerts.findIndex(a => a.key === key);
     if (idx >= 0) alerts[idx] = entry;
     else          alerts.unshift(entry);
     if (alerts.length > 10) alerts.pop();
-
     renderAlerts(gh);
 }
 
