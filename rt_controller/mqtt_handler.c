@@ -4,11 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Topic subscriptions                                                  */
-/* Add a new entry here to subscribe to an additional topic pattern.   */
-/* ------------------------------------------------------------------ */
-
 static const char *TOPIC_PATTERNS[] = {
     "greenhouse/%d/plant/+/soil",
     "greenhouse/%d/plant/+/temp",
@@ -17,10 +12,6 @@ static const char *TOPIC_PATTERNS[] = {
 
 #define TOPIC_PATTERN_COUNT \
     (int)(sizeof(TOPIC_PATTERNS) / sizeof(TOPIC_PATTERNS[0]))
-
-/* ------------------------------------------------------------------ */
-/* MQTT callbacks                                                       */
-/* ------------------------------------------------------------------ */
 
 static void on_connect(struct mosquitto *mosq, void *userdata, int rc)
 {
@@ -51,13 +42,6 @@ static void on_disconnect(struct mosquitto *mosq, void *userdata, int rc)
     }
 }
 
-/*
- * on_message - store the incoming reading in the shared snapshot.
- *
- * Rule evaluation is intentionally NOT done here.  The RT control thread
- * reads the snapshot and applies rules on its own deterministic schedule,
- * so that SCHED_FIFO priority actually governs when the rules run.
- */
 static void on_message(struct mosquitto *mosq, void *userdata,
                        const struct mosquitto_message *msg)
 {
@@ -72,7 +56,6 @@ static void on_message(struct mosquitto *mosq, void *userdata,
     memcpy(payload, msg->payload, len);
     payload[len] = '\0';
 
-    /* Extract plant_id from: greenhouse/{id}/plant/{plant_id}/... */
     const char *ptr = strstr(msg->topic, "/plant/");
     if (!ptr) return;
     int plant_id = atoi(ptr + 7);
@@ -99,10 +82,6 @@ static void on_message(struct mosquitto *mosq, void *userdata,
     printf("[MQTT] %s = %s\n", msg->topic, payload);
 }
 
-/* ------------------------------------------------------------------ */
-/* Public API                                                           */
-/* ------------------------------------------------------------------ */
-
 int mqtt_handler_init(mqtt_context_t *ctx,
                       const char     *host,
                       int             port,
@@ -113,8 +92,6 @@ int mqtt_handler_init(mqtt_context_t *ctx,
 
     pthread_mutex_init(&ctx->snapshot.lock, NULL);
 
-    /* All actuator states start as unknown so the first evaluation
-     * always publishes the initial command. */
     ctx->actuators.window       = ACT_UNKNOWN;
     ctx->actuators.co2_enricher = ACT_UNKNOWN;
     ctx->actuators.alarm        = ACT_UNKNOWN;

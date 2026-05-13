@@ -3,10 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Internal helpers                                                     */
-/* ------------------------------------------------------------------ */
-
 static void publish_retained(struct mosquitto *mosq,
                               const char       *topic,
                               const char       *payload)
@@ -16,7 +12,6 @@ static void publish_retained(struct mosquitto *mosq,
         fprintf(stderr, "[Rules] Publish failed: %s\n", topic);
 }
 
-/* Publish only when desired state differs from last known state. */
 static void publish_if_changed(struct mosquitto *mosq,
                                 const char       *topic,
                                 int               desired,
@@ -32,10 +27,6 @@ static void publish_if_changed(struct mosquitto *mosq,
     *current = desired;
 }
 
-/* ------------------------------------------------------------------ */
-/* Rule evaluation                                                      */
-/* ------------------------------------------------------------------ */
-
 void rules_evaluate_snapshot(struct mosquitto         *mosq,
                               int                       greenhouse_id,
                               const sensor_snapshot_t  *snap,
@@ -44,14 +35,13 @@ void rules_evaluate_snapshot(struct mosquitto         *mosq,
     char topic[128];
     char label[80];
 
-    /* ---- Per-plant: PUMP ----------------------------------------- */
     for (int pid = 1; pid <= MAX_PLANTS; pid++) {
         if (!(snap->received[pid] & 0x1)) continue;
 
         int desired;
         if      (snap->soil[pid] <  RULE_SOIL_MOISTURE_MIN) desired = ACT_ON;
         else if (snap->soil[pid] >= RULE_SOIL_MOISTURE_MAX) desired = ACT_OFF;
-        else continue;   /* hysteresis band — hold current state */
+        else continue;
 
         snprintf(topic, sizeof(topic),
                  "greenhouse/%d/plant/%d/pump", greenhouse_id, pid);
@@ -61,13 +51,6 @@ void rules_evaluate_snapshot(struct mosquitto         *mosq,
                            "ON", "OFF", label);
     }
 
-    /* ---- Greenhouse-level: WINDOW -------------------------------- */
-    /*
-     * Opens when ANY plant exceeds RULE_TEMP_MAX (temperature)
-     *        OR  ANY plant exceeds RULE_CO2_VENT_ON (CO2 ventilation).
-     * Closes when ALL measured plants are within safe limits AND
-     *   CO2 data has been received (avoids transient CLOSED at startup).
-     */
     {
         int want_open  = 0;
         int want_close = 1;
@@ -92,7 +75,7 @@ void rules_evaluate_snapshot(struct mosquitto         *mosq,
             int desired_win;
             if      (want_open)  desired_win = ACT_ON;
             else if (want_close) desired_win = ACT_OFF;
-            else                 desired_win = act->window;  /* hysteresis — hold */
+            else                 desired_win = act->window;
 
             if (desired_win != ACT_UNKNOWN) {
                 snprintf(topic, sizeof(topic), "greenhouse/%d/window", greenhouse_id);
@@ -103,11 +86,6 @@ void rules_evaluate_snapshot(struct mosquitto         *mosq,
         }
     }
 
-    /* ---- Greenhouse-level: CO2 ENRICHER -------------------------- */
-    /*
-     * Turns ON when CO2 < RULE_CO2_ENRICH_ON and window is closed.
-     * Turns OFF when CO2 >= RULE_CO2_ENRICH_OFF or window opens.
-     */
     {
         int co2_low  = 0;
         int co2_ok   = 1;
@@ -127,7 +105,7 @@ void rules_evaluate_snapshot(struct mosquitto         *mosq,
             if      (window_open) desired_enrich = ACT_OFF;
             else if (co2_low)     desired_enrich = ACT_ON;
             else if (!co2_ok)     desired_enrich = ACT_OFF;
-            else                  desired_enrich = act->co2_enricher;  /* hold */
+            else                  desired_enrich = act->co2_enricher;
 
             if (desired_enrich != ACT_UNKNOWN) {
                 snprintf(topic, sizeof(topic), "greenhouse/%d/co2_enricher", greenhouse_id);
@@ -138,12 +116,6 @@ void rules_evaluate_snapshot(struct mosquitto         *mosq,
         }
     }
 
-    /* ---- CO2 ALARM ----------------------------------------------- */
-    /*
-     * Publishes CRITICAL when any plant exceeds RULE_CO2_MAX.
-     * Publishes OK (retained) once all measured plants are below threshold
-     * so the dashboard can clear the alert automatically.
-     */
     {
         int alarm_active = 0;
         int have_co2     = 0;

@@ -14,25 +14,11 @@
 #define MQTT_BROKER_PORT    1883
 #define GREENHOUSE_ID       1
 
-/*
- * Control loop period: 100 ms expressed in nanoseconds.
- * clock_nanosleep with TIMER_ABSTIME advances an absolute deadline by this
- * amount each cycle, so accumulated drift is zero over time.
- */
-#define LOOP_PERIOD_NS      100000000L   /* 100 ms */
-
-/*
- * Warn when a cycle wakes up more than 5 ms late.
- * Under SCHED_FIFO on real hardware this should rarely trigger.
- */
-#define DEADLINE_WARN_NS    5000000L     /* 5 ms */
-
-/* ------------------------------------------------------------------ */
+#define LOOP_PERIOD_NS      100000000L
+#define DEADLINE_WARN_NS    5000000L
 
 static volatile int   g_running = 1;
 static mqtt_context_t g_mqtt;
-
-/* ------------------------------------------------------------------ */
 
 static void handle_signal(int sig)
 {
@@ -40,21 +26,6 @@ static void handle_signal(int sig)
     g_running = 0;
 }
 
-/*
- * rt_control_loop - periodic real-time task running at SCHED_FIFO priority.
- *
- * Each cycle:
- *  1. Sleep until the next absolute deadline (clock_nanosleep TIMER_ABSTIME).
- *     This eliminates drift: the deadline advances by exactly LOOP_PERIOD_NS
- *     regardless of how long the work took.
- *  2. Measure actual wakeup jitter with clock_gettime(CLOCK_MONOTONIC).
- *  3. Take a lock-free snapshot of the latest sensor readings.
- *  4. Apply control rules for every plant that has received data.
- *
- * Separating rule evaluation from the MQTT callback thread is the reason
- * SCHED_FIFO priority matters: the RT thread is never preempted by the
- * network or OS scheduler while evaluating rules or publishing commands.
- */
 static void *rt_control_loop(void *arg)
 {
     mqtt_context_t *ctx = (mqtt_context_t *)arg;
@@ -70,17 +41,14 @@ static void *rt_control_loop(void *arg)
 
     while (g_running) {
 
-        /* Advance absolute deadline by one period (no drift). */
         deadline.tv_nsec += LOOP_PERIOD_NS;
         if (deadline.tv_nsec >= 1000000000L) {
             deadline.tv_nsec -= 1000000000L;
             deadline.tv_sec  += 1;
         }
 
-        /* Sleep until the absolute deadline. */
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
 
-        /* Measure how late we actually woke up (jitter). */
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         long jitter_ns = (now.tv_sec  - deadline.tv_sec)  * 1000000000L
@@ -96,28 +64,21 @@ static void *rt_control_loop(void *arg)
 
         cycle_count++;
 
-        /* Log timing statistics every 10 cycles (~1 s). */
         if (cycle_count % 10 == 0) {
             printf("[RT] cycle=%-5ld  jitter=%3ld us  max=%3ld us\n",
                    cycle_count, jitter_ns / 1000L, jitter_max_ns / 1000L);
         }
 
-        /* Skip rule evaluation if the broker is not yet connected. */
         if (!ctx->connected) continue;
 
-        /* Take a local copy of the snapshot under the mutex,
-         * then immediately release the lock so the MQTT thread is not
-         * blocked while rules are evaluated. */
         sensor_snapshot_t snap;
         pthread_mutex_lock(&ctx->snapshot.lock);
         snap                  = ctx->snapshot;
         ctx->snapshot.updated = 0;
         pthread_mutex_unlock(&ctx->snapshot.lock);
 
-        /* Only evaluate rules when new sensor data has arrived. */
         if (!snap.updated) continue;
 
-        /* Pass actuator state so rules only publish on state change. */
         rules_evaluate_snapshot(ctx->mosq, ctx->greenhouse_id,
                                 &snap, &ctx->actuators);
     }
@@ -127,8 +88,6 @@ static void *rt_control_loop(void *arg)
 
     return NULL;
 }
-
-/* ------------------------------------------------------------------ */
 
 int main(int argc, char *argv[])
 {
@@ -146,7 +105,6 @@ int main(int argc, char *argv[])
     signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
 
-    /* Attempt SCHED_FIFO + mlockall.  Falls back gracefully if unprivileged. */
     if (rt_scheduler_init(RT_PRIORITY) != 0) {
         fprintf(stderr,
                 "[Main] Real-time scheduling unavailable. "
@@ -160,8 +118,6 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Pass the MQTT context to the RT thread so it can read the snapshot
-     * and publish actuator commands directly. */
     pthread_t rt_thread;
     if (pthread_create(&rt_thread, NULL, rt_control_loop, &g_mqtt) != 0) {
         perror("[Main] pthread_create failed");
